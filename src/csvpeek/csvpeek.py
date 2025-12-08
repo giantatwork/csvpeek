@@ -40,7 +40,7 @@ class CSVViewerApp(App):
         Binding("s", "sort_column", "Sort column", priority=True, show=False),
     ]
 
-    PAGE_SIZE = 100  # Number of rows to load per page
+    PAGE_SIZE = 50  # Number of rows to load per page
 
     def __init__(self, csv_path: str) -> None:
         super().__init__()

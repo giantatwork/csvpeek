@@ -9,15 +9,15 @@
 
 ## ✨ Features
 
-- ⚡ **Fast** - Lazy loading with Polars means instant startup, even with huge files
-- 🔍 **Smart Filtering** - Real-time column filtering with literal text search and numeric ranges
-- 🎨 **Modern TUI** - Beautiful terminal interface with syntax highlighting
-- 📊 **Large File Support** - Pagination handles millions of rows without breaking a sweat
-- 🎯 **Cell Selection** - Select and copy ranges with keyboard shortcuts
-- 🔄 **Column Sorting** - Sort by any column instantly
-- 💾 **Memory Efficient** - Only loads the data you're viewing (100 rows at a time)
-- 🎭 **Visual Feedback** - Highlighted filter matches and selected cells
-- ⌨️ **Keyboard-First** - Every action is a keystroke away
+- **Fast** - Lazy loading with Polars means instant startup, even with huge files
+- **Smart Filtering** - Real-time column filtering with literal text search and numeric ranges
+- **Modern TUI** - Beautiful terminal interface with syntax highlighting
+- **Large File Support** - Pagination handles millions of rows without breaking a sweat
+- **Cell Selection** - Select and copy ranges with keyboard shortcuts
+- **Column Sorting** - Sort by any column instantly
+- **Memory Efficient** - Only loads the data you're viewing (100 rows at a time)
+- **Visual Feedback** - Highlighted filter matches and selected cells
+- **Keyboard-First** - Every action is a keystroke away
 
 ## 🚀 Quick Start
 
@@ -180,7 +180,7 @@ python csvpeek.py data.csv
 
 - `q` - Quit the application
 - `r` - Reset all filters
-- `Ctrl+F` - Focus on filter inputs
+- `f` - Focus on filter inputs
 - `Tab` - Navigate between filter inputs
 - `Enter` - Apply filters
 - Arrow keys - Navigate the data table
