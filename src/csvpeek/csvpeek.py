@@ -3,8 +3,6 @@
 csvpeek - A snappy, memory-efficient CSV viewer using Polars and Textual.
 """
 
-import re
-import sys
 from pathlib import Path
 from typing import Optional
 
