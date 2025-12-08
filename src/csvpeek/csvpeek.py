@@ -61,6 +61,8 @@ class CSVViewerApp(App):
         self.selection_end_row: Optional[int] = None
         self.selection_end_col: Optional[int] = None
         self.sort_order_descending: bool = False
+        self.sorted_column: Optional[str] = None
+        self.sorted_descending: bool = False
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
@@ -103,10 +105,16 @@ class CSVViewerApp(App):
 
         table.clear(columns=True)
 
-        # Add columns
+        # Add columns with sort indicators
         if self.df is not None:
             for col in self.df.columns:
-                table.add_column(col, key=col)
+                # Add sort arrow if this column is sorted
+                if col == self.sorted_column:
+                    arrow = " ▼" if self.sorted_descending else " ▲"
+                    col_label = f"{col}{arrow}"
+                else:
+                    col_label = col
+                table.add_column(col_label, key=col)
 
         # Load only the current page of data
         offset = self.current_page * self.PAGE_SIZE
@@ -136,8 +144,11 @@ class CSVViewerApp(App):
         for row_idx, row in enumerate(page_df.iter_rows()):
             styled_row = []
             for col_idx, cell in enumerate(row):
+                if col_idx >= len(self.df.columns):
+                    break  # Safety check
                 col_name = self.df.columns[col_idx]
-                cell_str = str(cell)
+                # Convert to string, handling None explicitly
+                cell_str = "" if cell is None else str(cell)
 
                 # Check if this cell is in the selection
                 is_selected = (
@@ -240,6 +251,12 @@ class CSVViewerApp(App):
             self.lazy_df, self.df, self.current_filters
         )
 
+        # Re-apply sort if a column is currently sorted
+        if self.sorted_column is not None:
+            self.filtered_lazy = self.filtered_lazy.sort(
+                self.sorted_column, descending=self.sorted_descending, nulls_last=True
+            )
+
         # Update filtered lazy frame and reset to first page
         self.current_page = 0
         self.total_filtered_rows = self.filtered_lazy.select(pl.len()).collect().item()
@@ -251,6 +268,8 @@ class CSVViewerApp(App):
         self.current_filters = {}
         self.filtered_lazy = self.lazy_df
         self.current_page = 0
+        self.sorted_column = None
+        self.sorted_descending = False
         if self.lazy_df is not None:
             self.total_filtered_rows = self.lazy_df.select(pl.len()).collect().item()
         self.populate_table()
@@ -390,8 +409,11 @@ class CSVViewerApp(App):
             col_idx = table.cursor_column
             row_idx = table.cursor_row
             cell = self.cached_page_df.row(row_idx)[col_idx]
-            pyperclip.copy(str(cell))
-            self.notify(f"Copied {cell} to clipboard", timeout=2)
+            cell_str = "" if cell is None else str(cell)
+            pyperclip.copy(cell_str)
+            self.notify(
+                f"Copied {cell_str if cell_str else '(empty)'} to clipboard", timeout=2
+            )
             self.update_status()
             return
 
@@ -413,7 +435,7 @@ class CSVViewerApp(App):
                 row_data = self.cached_page_df.row(row_idx)
 
                 selected_cells = [
-                    str(row_data[col_idx])
+                    "" if row_data[col_idx] is None else str(row_data[col_idx])
                     for col_idx in range(col_start, min(col_end + 1, len(row_data)))
                 ]
                 lines.append("\t".join(selected_cells))
@@ -440,19 +462,26 @@ class CSVViewerApp(App):
 
         if col_idx is not None and col_idx < len(self.df.columns):
             col_name = self.df.columns[col_idx]
-            # Sort the filtered lazy frame
+
+            # Toggle sort direction if sorting same column, otherwise start with ascending
+            if self.sorted_column == col_name:
+                self.sorted_descending = not self.sorted_descending
+            else:
+                self.sorted_column = col_name
+                self.sorted_descending = False
+
+            # Sort the filtered lazy frame with nulls last
             self.filtered_lazy = self.filtered_lazy.sort(
-                col_name, descending=self.sort_order_descending
+                col_name, descending=self.sorted_descending, nulls_last=True
             )
             # Reset to first page and refresh
             self.current_page = 0
             self.populate_table()
             self.update_status()
             self.notify(
-                f"Sorted by {col_name} {'descending' if self.sort_order_descending else 'ascending'}",
+                f"Sorted by {col_name} {'descending ▼' if self.sorted_descending else 'ascending ▲'}",
                 timeout=2,
             )
-            self.sort_order_descending = not self.sort_order_descending
 
     def update_status(self) -> None:
         """Update the status bar."""
