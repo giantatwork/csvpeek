@@ -61,6 +61,7 @@ class CSVViewerApp(App):
         self.sort_order_descending: bool = False
         self.sorted_column: Optional[str] = None
         self.sorted_descending: bool = False
+        self.column_widths: Optional[dict[str, int]] = None
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
@@ -79,7 +80,10 @@ class CSVViewerApp(App):
         """Load CSV file using Polars."""
         try:
             # Use Polars lazy API for efficient filtering
-            self.lazy_df = pl.scan_csv(self.csv_path)
+            # Load all columns as strings to avoid type inference issues
+            self.lazy_df = pl.scan_csv(
+                self.csv_path, schema_overrides={}, infer_schema_length=0
+            )
             # Only load a small sample for metadata (columns and dtypes)
             self.df = self.lazy_df.head(1).collect()
             # Start with no filters applied
@@ -87,8 +91,45 @@ class CSVViewerApp(App):
             self.total_filtered_rows = self.lazy_df.select(pl.len()).collect().item()
             self.current_page = 0
             self.title = f"csvpeek - {self.csv_path.name}"
+            # Calculate column widths from a sample of data
+            self._calculate_column_widths()
         except Exception as e:
             self.exit(message=f"Error loading CSV: {e}")
+
+    def _calculate_column_widths(self) -> None:
+        """Calculate optimal column widths based on a sample of data."""
+        if self.lazy_df is None or self.df is None:
+            return
+
+        try:
+            # Sample data from different parts of the file for better width estimation
+            sample_size = min(1000, self.total_filtered_rows)
+            sample_df = self.lazy_df.head(sample_size).collect()
+
+            self.column_widths = {}
+            for col in self.df.columns:
+                # Calculate max width needed for this column
+                # Consider column header length + arrow space
+                header_len = len(col) + 3  # +3 for potential sort arrow
+
+                # Get max value length in the sample
+                if col in sample_df.columns:
+                    max_val_len = sample_df[col].cast(pl.Utf8).str.len_chars().max()
+                    if max_val_len is not None:
+                        content_len = max_val_len
+                    else:
+                        content_len = 0
+                else:
+                    content_len = 0
+
+                # Use the larger of header or content, with reasonable bounds
+                width = max(header_len, content_len)
+                width = max(10, min(width, 50))  # Between 10 and 50 characters
+
+                self.column_widths[col] = width
+        except Exception:
+            # If calculation fails, don't use fixed widths
+            self.column_widths = None
 
     def populate_table(self) -> None:
         """Populate the data table with current page of data."""
@@ -103,7 +144,7 @@ class CSVViewerApp(App):
 
         table.clear(columns=True)
 
-        # Add columns with sort indicators
+        # Add columns with sort indicators and fixed widths
         if self.df is not None:
             for col in self.df.columns:
                 # Add sort arrow if this column is sorted
@@ -112,7 +153,12 @@ class CSVViewerApp(App):
                     col_label = f"{col}{arrow}"
                 else:
                     col_label = col
-                table.add_column(col_label, key=col)
+
+                # Use cached column width if available
+                if self.column_widths and col in self.column_widths:
+                    table.add_column(col_label, key=col, width=self.column_widths[col])
+                else:
+                    table.add_column(col_label, key=col)
 
         # Load only the current page of data
         offset = self.current_page * self.PAGE_SIZE
@@ -278,13 +324,23 @@ class CSVViewerApp(App):
         if self.df is None:
             return
 
+        # Get the currently selected column
+        table = self.query_one("#data-table", DataTable)
+        selected_column = None
+        if table.cursor_column is not None and table.cursor_column < len(
+            self.df.columns
+        ):
+            selected_column = self.df.columns[table.cursor_column]
+
         def handle_filter_result(result: Optional[dict[str, str]]) -> None:
             """Handle the result from the filter modal."""
             if result is not None:
                 self.apply_filters(result)
 
         self.push_screen(
-            FilterModal(self.df.columns.copy(), self.current_filters.copy()),
+            FilterModal(
+                self.df.columns.copy(), self.current_filters.copy(), selected_column
+            ),
             handle_filter_result,
         )
 

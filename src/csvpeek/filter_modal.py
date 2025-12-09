@@ -1,5 +1,7 @@
 """Filter modal dialog for csvpeek."""
 
+from typing import Optional
+
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen
@@ -9,10 +11,16 @@ from textual.widgets import Input, Label, Static
 class FilterModal(ModalScreen):
     """Modal screen for entering filters."""
 
-    def __init__(self, columns: list[str], current_filters: dict[str, str]) -> None:
+    def __init__(
+        self,
+        columns: list[str],
+        current_filters: dict[str, str],
+        selected_column: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self.columns = columns
         self.current_filters = current_filters
+        self.selected_column = selected_column
         self.filter_inputs: dict[str, Input] = {}
 
     def compose(self) -> ComposeResult:
@@ -38,8 +46,12 @@ class FilterModal(ModalScreen):
     def on_mount(self) -> None:
         """Focus first input when modal opens."""
         if self.filter_inputs:
-            first_input = list(self.filter_inputs.values())[0]
-            first_input.focus()
+            # Focus the selected column's input if provided, otherwise first input
+            if self.selected_column and self.selected_column in self.filter_inputs:
+                self.filter_inputs[self.selected_column].focus()
+            else:
+                first_input = list(self.filter_inputs.values())[0]
+                first_input.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Apply filters when Enter is pressed."""
