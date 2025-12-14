@@ -30,7 +30,7 @@ pip install csvpeek
 Or install from source:
 
 ```bash
-git clone https://github.com/yourusername/csvpeek.git
+git clone https://github.com/giantatwork/csvpeek.git
 cd csvpeek
 pip install -e .
 ```
@@ -69,9 +69,13 @@ csvpeek data.csv
 3. Press `Enter` to apply
 4. Filter matches are highlighted in red
 
-**Supported filters:**
-- **Text columns**: Case-insensitive substring search (e.g., `.nl` finds `example.nl`)
-- **Numeric columns**: Exact match (e.g., `42`) or ranges (e.g., `10-20`)
+**Filter modes:**
+- **Literal mode**: Case-insensitive substring search (e.g., `scranton` matches "Scranton")
+- **Regex mode**: Start with `/` for regex patterns (e.g., `/^J` matches names starting with J)
+  - `/\d+` - Contains digits
+  - `/sales|eng` - Contains "sales" OR "eng"
+  - `/^test$` - Exactly "test"
+  - All regex patterns are case-insensitive
 
 ### Sorting
 1. Navigate to any column
@@ -152,7 +156,7 @@ Built with amazing open-source tools:
 
 ## 📬 Contact
 
-Found a bug? Have a feature request? [Open an issue](https://github.com/yourusername/csvpeek/issues)!
+Found a bug? Have a feature request? [Open an issue](https://github.com/giantatwork/csvpeek/issues)!
 
 ---
 
@@ -187,15 +191,7 @@ python csvpeek.py data.csv
 
 ## Filtering
 
-### Text Columns
-- Type any text to filter (case-insensitive contains search)
 - Example: typing "john" will show all rows where the column contains "john"
-
-### Numeric Columns
-- **Exact match**: Type a number (e.g., `42`)
-- **Range filter**: Use format `min-max` (e.g., `10-20`)
-
-### Multiple Filters
 - Apply filters to multiple columns simultaneously
 - All filters are combined with AND logic
 

@@ -27,7 +27,7 @@ class FilterModal(ModalScreen):
         """Create filter inputs for each column."""
         with Container(id="filter-dialog"):
             yield Static(
-                "Enter Filters (Tab to navigate, Enter to apply, Esc to cancel)",
+                "Enter Filters (Start with / for regex, Tab to navigate, Enter to apply, Esc to cancel)",
                 id="filter-title",
             )
             with VerticalScroll(id="filter-inputs"):
@@ -37,7 +37,7 @@ class FilterModal(ModalScreen):
                         col_id = col.replace(" ", "_").replace("-", "_")
                         filter_input = Input(
                             value=self.current_filters.get(col, ""),
-                            placeholder=f"Filter {col}...",
+                            placeholder=f"text or /regex...",
                             id=f"filter-{col_id}",
                         )
                         self.filter_inputs[col] = filter_input

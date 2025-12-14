@@ -51,6 +51,9 @@ class CSVViewerApp(App):
         self.current_page: int = 0
         self.total_filtered_rows: int = 0
         self.current_filters: dict[str, str] = {}
+        self.filter_patterns: dict[
+            str, tuple[str, bool]
+        ] = {}  # col -> (pattern, is_regex)
         self.cached_page_df: Optional[pl.DataFrame] = None
         # Selection tracking
         self.selection_active: bool = False
@@ -114,7 +117,8 @@ class CSVViewerApp(App):
 
                 # Get max value length in the sample
                 if col in sample_df.columns:
-                    max_val_len = sample_df[col].cast(pl.Utf8).str.len_chars().max()
+                    # All columns are already strings, no need to cast
+                    max_val_len = sample_df[col].str.len_chars().max()
                     if max_val_len is not None:
                         content_len = max_val_len
                     else:
@@ -169,13 +173,6 @@ class CSVViewerApp(App):
 
         self.cached_page_df = page_df  # Cache for yank operation
 
-        # Pre-compute which columns have active filters
-        active_filters = {
-            col: val.strip().lower()
-            for col, val in self.current_filters.items()
-            if val.strip()
-        }
-
         # Calculate selection bounds if selection is active
         sel_row_start = sel_row_end = sel_col_start = sel_col_end = None
         if self.selection_active:
@@ -191,8 +188,8 @@ class CSVViewerApp(App):
                 if col_idx >= len(self.df.columns):
                     break  # Safety check
                 col_name = self.df.columns[col_idx]
-                # Convert to string, handling None explicitly
-                cell_str = "" if cell is None else str(cell)
+                # Data is already strings and fill_null("") ensures no None values
+                cell_str = cell
 
                 # Check if this cell is in the selection
                 is_selected = (
@@ -203,11 +200,15 @@ class CSVViewerApp(App):
                     and sel_col_start <= col_idx <= sel_col_end
                 )
 
-                # Get filter value for this column if it exists
-                filter_value = active_filters.get(col_name)
+                # Get filter info for this column if it exists
+                filter_info = self.filter_patterns.get(col_name)
+                if filter_info:
+                    filter_pattern, is_regex = filter_info
+                else:
+                    filter_pattern, is_regex = None, False
 
                 # Style the cell
-                text = style_cell(cell_str, is_selected, filter_value)
+                text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
                 styled_row.append(text)
 
             table.add_row(*styled_row)
@@ -243,30 +244,28 @@ class CSVViewerApp(App):
         # Find cells that changed state
         cells_to_update = old_selection.symmetric_difference(new_selection)
 
-        # Pre-compute active filters
-        active_filters = {
-            col: val.strip().lower()
-            for col, val in self.current_filters.items()
-            if val.strip()
-        }
-
         # Update only changed cells
         for row_idx, col_idx in cells_to_update:
             if row_idx >= self.cached_page_df.height or col_idx >= len(self.df.columns):
                 continue
 
             cell_value = self.cached_page_df.row(row_idx)[col_idx]
-            cell_str = str(cell_value)
+            # Data is already strings
+            cell_str = cell_value
             col_name = self.df.columns[col_idx]
 
             # Check if this cell is selected
             is_selected = (row_idx, col_idx) in new_selection
 
-            # Get filter value for this column if it exists
-            filter_value = active_filters.get(col_name)
+            # Get filter info for this column if it exists
+            filter_info = self.filter_patterns.get(col_name)
+            if filter_info:
+                filter_pattern, is_regex = filter_info
+            else:
+                filter_pattern, is_regex = None, False
 
             # Style the cell
-            text = style_cell(cell_str, is_selected, filter_value)
+            text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
 
             # Update the cell
             try:
@@ -285,6 +284,19 @@ class CSVViewerApp(App):
         # Update current filters if provided
         if filters is not None:
             self.current_filters = filters
+            # Build filter patterns dict with regex detection
+            self.filter_patterns = {}
+            for col, val in filters.items():
+                val_stripped = val.strip()
+                if val_stripped:
+                    if val_stripped.startswith("/"):
+                        # Regex mode: store pattern without leading /
+                        pattern = val_stripped[1:]
+                        if pattern:
+                            self.filter_patterns[col] = (pattern, True)
+                    else:
+                        # Literal mode: store as-is
+                        self.filter_patterns[col] = (val_stripped, False)
             # Debug: show what we're filtering
             active = {k: v for k, v in filters.items() if v.strip()}
             if active:
@@ -310,6 +322,7 @@ class CSVViewerApp(App):
     def action_reset_filters(self) -> None:
         """Reset all filters."""
         self.current_filters = {}
+        self.filter_patterns = {}  # Clear filter patterns to remove highlighting
         self.filtered_lazy = self.lazy_df
         self.current_page = 0
         self.sorted_column = None
