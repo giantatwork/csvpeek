@@ -4,6 +4,7 @@ csvpeek - A snappy, memory-efficient CSV viewer using Polars and Textual.
 """
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -59,6 +60,7 @@ class CSVViewerApp(App):
         self.current_page: int = 0
         self.total_filtered_rows: int = 0
         self.total_rows: int = 0
+        # Filters keyed by sanitized column names (Textual-safe)
         self.current_filters: dict[str, str] = {}
         self.filter_patterns: dict[
             str, tuple[str, bool]
@@ -81,6 +83,38 @@ class CSVViewerApp(App):
         self.preload_task: Optional[asyncio.Task] = None
         self.is_preloading: bool = False
         self._columns_initialized: bool = False
+        # Column key mapping to satisfy Textual identifier rules
+        self._column_keys: dict[str, str] = {}
+        self._column_key_used: set[str] = set()
+
+    def _sanitize_column_key(self, name: str) -> str:
+        """Sanitize column name to a Textual-safe identifier."""
+        base = re.sub(r"[^0-9A-Za-z_-]", "_", name)
+        if not base:
+            base = "col"
+        if base[0].isdigit():
+            base = f"col_{base}"
+        return base
+
+    def _get_column_key(self, name: str) -> str:
+        """Return a stable, unique, sanitized column key for DataTable."""
+        if name in self._column_keys:
+            return self._column_keys[name]
+
+        base = self._sanitize_column_key(name)
+        candidate = base
+        counter = 1
+        while candidate in self._column_key_used:
+            candidate = f"{base}_{counter}"
+            counter += 1
+
+        self._column_keys[name] = candidate
+        self._column_key_used.add(candidate)
+        return candidate
+
+    def _column_key_to_name(self) -> dict[str, str]:
+        """Reverse mapping from sanitized key to original column name."""
+        return {v: k for k, v in self._column_keys.items()}
 
     def _get_adaptive_page_size(self) -> int:
         """Get adaptive page size based on data complexity."""
@@ -271,10 +305,14 @@ class CSVViewerApp(App):
                     col_label = col
 
                 # Use cached column width if available
+                column_key = self._get_column_key(col)
+
                 if self.column_widths and col in self.column_widths:
-                    table.add_column(col_label, key=col, width=self.column_widths[col])
+                    table.add_column(
+                        col_label, key=column_key, width=self.column_widths[col]
+                    )
                 else:
-                    table.add_column(col_label, key=col)
+                    table.add_column(col_label, key=column_key)
             self._columns_initialized = True
 
         # Try to get data from cache first
@@ -423,10 +461,19 @@ class CSVViewerApp(App):
 
         # Update current filters if provided
         if filters is not None:
+            # filters are keyed by sanitized column key
             self.current_filters = filters
-            # Build filter patterns dict with regex detection
+
+            # Build a mapping back to original column names
+            key_to_name = self._column_key_to_name()
+
+            # Build filter patterns dict with regex detection using original names
             self.filter_patterns = {}
-            for col, val in filters.items():
+            filters_original: dict[str, str] = {}
+            for key, val in filters.items():
+                col = key_to_name.get(key)
+                if col is None:
+                    continue
                 val_stripped = val.strip()
                 if val_stripped:
                     if val_stripped.startswith("/"):
@@ -434,11 +481,14 @@ class CSVViewerApp(App):
                         pattern = val_stripped[1:]
                         if pattern:
                             self.filter_patterns[col] = (pattern, True)
+                            filters_original[col] = val_stripped
                     else:
                         # Literal mode: store as-is
                         self.filter_patterns[col] = (val_stripped, False)
-            # Debug: show what we're filtering
-            active = {k: v for k, v in filters.items() if v.strip()}
+                        filters_original[col] = val_stripped
+
+            # Debug: show what we're filtering (use original names)
+            active = {k: v for k, v in filters_original.items() if v.strip()}
             if active:
                 self.notify(f"Filtering: {active}", timeout=2)
 
@@ -446,8 +496,17 @@ class CSVViewerApp(App):
         self._invalidate_page_cache()
 
         # Apply filters using the standalone function
+        # Apply filters using the standalone function (with original names)
+        filters_for_lazy = {}
+        if self.current_filters:
+            key_to_name = self._column_key_to_name()
+            for key, val in self.current_filters.items():
+                col = key_to_name.get(key)
+                if col is not None:
+                    filters_for_lazy[col] = val
+
         self.filtered_lazy = apply_filters_to_lazyframe(
-            self.lazy_df, self.df, self.current_filters
+            self.lazy_df, self.df, filters_for_lazy
         )
 
         # Re-apply sort if a column is currently sorted
@@ -481,22 +540,31 @@ class CSVViewerApp(App):
         if self.df is None:
             return
 
-        # Get the currently selected column
+        # Get the currently selected column (original name and sanitized key)
         table = self.query_one("#data-table", DataTable)
-        selected_column = None
+        selected_column_key = None
         if table.cursor_column is not None and table.cursor_column < len(
             self.df.columns
         ):
             selected_column = self.df.columns[table.cursor_column]
+            selected_column_key = self._get_column_key(selected_column)
+        else:
+            selected_column = None
 
         def handle_filter_result(result: Optional[dict[str, str]]) -> None:
             """Handle the result from the filter modal."""
             if result is not None:
                 self.apply_filters(result)
 
+        columns_with_keys = [
+            (col, self._get_column_key(col)) for col in self.df.columns
+        ]
+
         self.push_screen(
             FilterModal(
-                self.df.columns.copy(), self.current_filters.copy(), selected_column
+                columns_with_keys,
+                self.current_filters.copy(),
+                selected_column_key,
             ),
             handle_filter_result,
         )
