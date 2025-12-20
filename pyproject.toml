@@ -38,7 +38,7 @@ Issues = "https://github.com/yourusername/csvpeek/issues"
 [project.scripts]
 csvpeek = "csvpeek.main:main"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
