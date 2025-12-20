@@ -390,7 +390,7 @@ class CSVViewerApp(App):
                 continue
 
             cell_value = self.cached_page_df.row(row_idx)[col_idx]
-            cell_str = cell_value
+            cell_str = "" if cell_value is None else str(cell_value)
             col_name = self.df.columns[col_idx]
             is_selected = (row_idx, col_idx) in new_selection
 
