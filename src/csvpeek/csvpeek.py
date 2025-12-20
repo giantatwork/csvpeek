@@ -653,10 +653,6 @@ class CSVViewerApp(App):
         if self.cached_page_df is None:
             return
 
-        if not self.selection_active:
-            self.notify("Please select a range of cells first", timeout=2)
-            return
-
         # Show the filename input field and focus it
         input_field = self.query_one("#filename-input", Input)
         input_field.display = True
@@ -687,16 +683,21 @@ class CSVViewerApp(App):
 
     def _save_to_file(self, file_path: str) -> None:
         """Save selected cells to the specified CSV file."""
-        if not self.selection_active:
+        if self.cached_page_df is None:
+            self.notify("No data to save", timeout=2)
             return
-
         try:
-            # Create a subset DataFrame with just the selected range
-            selected_df = create_selected_dataframe(self)
+            if not self.selection_active:
+                selected_df = self.cached_page_df
+                num_rows = selected_df.height
+                num_cols = len(selected_df.columns)
+            else:
+                # Create a subset DataFrame with just the selected range
+                selected_df = create_selected_dataframe(self)
+                num_rows, num_cols = get_selection_dimensions(self)
             # Save to file using Polars
             selected_df.write_csv(file_path, include_header=True)
             # Clear selection and notify
-            num_rows, num_cols = get_selection_dimensions(self)
             clear_selection_and_update(self)
             self.notify(
                 f"Saved {num_rows} rows, {num_cols} columns to {Path(file_path).name}",
