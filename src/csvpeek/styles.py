@@ -72,6 +72,20 @@ DataTable {
     padding: 0 1;
 }
 
+#filename-input {
+    height: 3;
+    background: $boost;
+    color: $text;
+    border: tall $accent;
+    padding: 0 1;
+    margin: 0;
+}
+
+#filename-input:focus {
+    background: $primary;
+    color: $text-muted;
+}
+
 Footer {
     background: $panel;
     dock: bottom;

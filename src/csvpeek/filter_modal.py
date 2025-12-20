@@ -37,7 +37,7 @@ class FilterModal(ModalScreen):
                         col_id = col.replace(" ", "_").replace("-", "_")
                         filter_input = Input(
                             value=self.current_filters.get(col, ""),
-                            placeholder=f"text or /regex...",
+                            placeholder="text or /regex...",
                             id=f"filter-{col_id}",
                         )
                         self.filter_inputs[col] = filter_input

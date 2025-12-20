@@ -9,10 +9,16 @@ from typing import Optional
 import polars as pl
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 from csvpeek.filter_modal import FilterModal
 from csvpeek.filters import apply_filters_to_lazyframe
+from csvpeek.selection_utils import (
+    clear_selection_and_update,
+    create_selected_dataframe,
+    get_selection_dimensions,
+    get_single_cell_value,
+)
 from csvpeek.styles import APP_CSS
 from csvpeek.styling import style_cell
 
@@ -29,6 +35,7 @@ class CSVViewerApp(App):
         Binding("ctrl+d", "next_page", "Next Page", priority=True),
         Binding("ctrl+u", "prev_page", "Prev Page", priority=True),
         Binding("c", "copy_selection", "Copy", priority=True),
+        Binding("w", "save_selection", "Save", priority=True),
         Binding("left", "move_left", "Move left", priority=True, show=False),
         Binding("right", "move_right", "Move right", priority=True, show=False),
         Binding("up", "move_up", "Move up", priority=True, show=False),
@@ -40,7 +47,7 @@ class CSVViewerApp(App):
         Binding("s", "sort_column", "Sort column", priority=True, show=False),
     ]
 
-    PAGE_SIZE = 50  # Number of rows to load per page
+    PAGE_SIZE = 50  # Number of rows to load per page (base size)
 
     def __init__(self, csv_path: str) -> None:
         super().__init__()
@@ -61,23 +68,56 @@ class CSVViewerApp(App):
         self.selection_start_col: Optional[int] = None
         self.selection_end_row: Optional[int] = None
         self.selection_end_col: Optional[int] = None
+        # Filename input tracking
+        self.filename_input_active: bool = False
         self.sort_order_descending: bool = False
         self.sorted_column: Optional[str] = None
         self.sorted_descending: bool = False
         self.column_widths: Optional[dict[str, int]] = None
+
+    def _get_adaptive_page_size(self) -> int:
+        """Get adaptive page size based on data complexity."""
+        if self.df is None:
+            return self.PAGE_SIZE
+
+        # Reduce page size for very wide tables to improve performance
+        num_cols = len(self.df.columns)
+        if num_cols > 20:
+            return max(25, self.PAGE_SIZE // 2)
+        elif num_cols > 10:
+            return max(35, int(self.PAGE_SIZE * 0.8))
+        else:
+            return self.PAGE_SIZE
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
         yield Header()
         yield DataTable(id="data-table")
         yield Static("", id="status")
+        yield Input(
+            placeholder="Enter filename to save (e.g., output.csv)", id="filename-input"
+        )
         yield Footer()
 
     def on_mount(self) -> None:
         """Load CSV and populate table."""
+        # Hide filename input initially
+        input_field = self.query_one("#filename-input", Input)
+        input_field.display = False
+
         self.load_csv()
         self.populate_table()
         self.update_status()
+
+    def on_key(self, event) -> None:
+        """Handle key events."""
+        if event.key == "escape" and self.filename_input_active:
+            # Hide the filename input field
+            input_field = self.query_one("#filename-input", Input)
+            input_field.display = False
+            input_field.value = ""
+            self.filename_input_active = False
+            event.prevent_default()
 
     def load_csv(self) -> None:
         """Load CSV file using Polars."""
@@ -164,16 +204,17 @@ class CSVViewerApp(App):
                 else:
                     table.add_column(col_label, key=col)
 
-        # Load only the current page of data
-        offset = self.current_page * self.PAGE_SIZE
-        page_df = self.filtered_lazy.slice(offset, self.PAGE_SIZE).collect()
+        # Load only the current page of data with adaptive sizing
+        page_size = self._get_adaptive_page_size()
+        offset = self.current_page * page_size
+        page_df = self.filtered_lazy.slice(offset, page_size).collect()
 
         # Replace None/null values with empty strings
         page_df = page_df.fill_null("")
 
         self.cached_page_df = page_df  # Cache for yank operation
 
-        # Calculate selection bounds if selection is active
+        # Pre-calculate selection bounds if selection is active
         sel_row_start = sel_row_end = sel_col_start = sel_col_end = None
         if self.selection_active:
             sel_row_start = min(self.selection_start_row, self.selection_end_row)
@@ -181,17 +222,53 @@ class CSVViewerApp(App):
             sel_col_start = min(self.selection_start_col, self.selection_end_col)
             sel_col_end = max(self.selection_start_col, self.selection_end_col)
 
-        # Add rows with highlighted matches
+        # Pre-compile filter patterns for performance
+        filter_patterns = {}
+        for col_name, (pattern, is_regex) in self.filter_patterns.items():
+            if pattern:
+                filter_patterns[col_name] = (pattern, is_regex)
+
+        # Add rows with highlighted matches - batch process for better performance
+        rows_data = []
         for row_idx, row in enumerate(page_df.iter_rows()):
             styled_row = []
             for col_idx, cell in enumerate(row):
                 if col_idx >= len(self.df.columns):
                     break  # Safety check
                 col_name = self.df.columns[col_idx]
-                # Data is already strings and fill_null("") ensures no None values
                 cell_str = cell
 
                 # Check if this cell is in the selection
+                is_selected = (
+                    self.selection_active
+                    and sel_row_start is not None
+                    and sel_col_start is not None
+                    and sel_row_start <= row_idx <= sel_row_end
+                    and sel_col_start <= col_idx <= sel_col_end
+                )
+
+                # Get filter info for this column if it exists
+                filter_info = filter_patterns.get(col_name)
+                if filter_info:
+                    filter_pattern, is_regex = filter_info
+                else:
+                    filter_pattern, is_regex = None, False
+
+                # Style the cell
+                text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
+                styled_row.append(text)
+            rows_data.append(styled_row)
+
+        # Add all rows at once for better performance
+        for styled_row in rows_data:
+            table.add_row(*styled_row)
+
+        # Restore cursor position
+        if cursor_row is not None and cursor_col is not None:
+            try:
+                table.move_cursor(row=cursor_row, column=cursor_col, animate=False)
+            except Exception:
+                pass
                 is_selected = (
                     self.selection_active
                     and sel_row_start is not None
@@ -244,21 +321,25 @@ class CSVViewerApp(App):
         # Find cells that changed state
         cells_to_update = old_selection.symmetric_difference(new_selection)
 
-        # Update only changed cells
+        # Cache filter patterns for performance
+        filter_patterns = {}
+        for col_name, (pattern, is_regex) in self.filter_patterns.items():
+            if pattern:
+                filter_patterns[col_name] = (pattern, is_regex)
+
+        # Update only changed cells - batch updates for better performance
+        updates = []
         for row_idx, col_idx in cells_to_update:
             if row_idx >= self.cached_page_df.height or col_idx >= len(self.df.columns):
                 continue
 
             cell_value = self.cached_page_df.row(row_idx)[col_idx]
-            # Data is already strings
             cell_str = cell_value
             col_name = self.df.columns[col_idx]
-
-            # Check if this cell is selected
             is_selected = (row_idx, col_idx) in new_selection
 
-            # Get filter info for this column if it exists
-            filter_info = self.filter_patterns.get(col_name)
+            # Get filter info for this column
+            filter_info = filter_patterns.get(col_name)
             if filter_info:
                 filter_pattern, is_regex = filter_info
             else:
@@ -266,14 +347,17 @@ class CSVViewerApp(App):
 
             # Style the cell
             text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
+            updates.append((row_idx, col_idx, text))
 
-            # Update the cell
+        # Apply all updates at once
+        for row_idx, col_idx, text in updates:
             try:
                 table.update_cell_at((row_idx, col_idx), text, update_width=False)
             except Exception:
+                # Cell might not exist or be out of bounds
                 pass
 
-        # Store current selection for next comparison
+        # Cache current selection for next update
         self._last_selection_cells = new_selection
 
     def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
@@ -359,7 +443,8 @@ class CSVViewerApp(App):
 
     def action_next_page(self) -> None:
         """Load next page of data."""
-        max_page = (self.total_filtered_rows - 1) // self.PAGE_SIZE
+        page_size = self._get_adaptive_page_size()
+        max_page = (self.total_filtered_rows - 1) // page_size
         if self.current_page < max_page:
             self.current_page += 1
             self.populate_table()
@@ -472,11 +557,8 @@ class CSVViewerApp(App):
         import pyperclip
 
         if not self.selection_active:
-            table = self.query_one("#data-table", DataTable)
-            col_idx = table.cursor_column
-            row_idx = table.cursor_row
-            cell = self.cached_page_df.row(row_idx)[col_idx]
-            cell_str = "" if cell is None else str(cell)
+            # Copy single cell
+            cell_str = get_single_cell_value(self)
             pyperclip.copy(cell_str)
             self.notify(
                 f"Copied {cell_str if cell_str else '(empty)'} to clipboard", timeout=2
@@ -484,40 +566,84 @@ class CSVViewerApp(App):
             self.update_status()
             return
 
-        # Calculate selection bounds
-        row_start = min(self.selection_start_row, self.selection_end_row)
-        row_end = max(self.selection_start_row, self.selection_end_row)
-        col_start = min(self.selection_start_col, self.selection_end_col)
-        col_end = max(self.selection_start_col, self.selection_end_col)
+        # Build CSV content from selection using Polars
+        from io import StringIO
 
-        # Build CSV content from selection
-        lines = []
-        column_headers = [
-            str(col_name)
-            for col_name in self.cached_page_df.columns[col_start : col_end + 1]
-        ]
-        lines.append("\t".join(column_headers))
-        for row_idx in range(row_start, row_end + 1):
-            if row_idx < self.cached_page_df.height:
-                row_data = self.cached_page_df.row(row_idx)
+        # Create a subset DataFrame with just the selected range
+        selected_df = create_selected_dataframe(self)
 
-                selected_cells = [
-                    "" if row_data[col_idx] is None else str(row_data[col_idx])
-                    for col_idx in range(col_start, min(col_end + 1, len(row_data)))
-                ]
-                lines.append("\t".join(selected_cells))
+        # Use Polars to write properly escaped CSV
+        csv_buffer = StringIO()
+        selected_df.write_csv(csv_buffer, include_header=True)
+        csv_content = csv_buffer.getvalue()
 
         # Copy to clipboard
-
-        pyperclip.copy("\n".join(lines))
+        pyperclip.copy(csv_content)
 
         # Clear selection and notify
-        self.selection_active = False
-        self.populate_table()
+        num_rows, num_cols = get_selection_dimensions(self)
+        clear_selection_and_update(self)
         self.notify(
-            f"Copied {len(lines)} rows, {col_end - col_start + 1} columns", timeout=2
+            f"Copied {num_rows} rows, {num_cols} columns",
+            timeout=2,
         )
-        self.update_status()
+
+    def action_save_selection(self) -> None:
+        """Show filename input field to save selected cells."""
+        if self.cached_page_df is None:
+            return
+
+        if not self.selection_active:
+            self.notify("Please select a range of cells first", timeout=2)
+            return
+
+        # Show the filename input field and focus it
+        input_field = self.query_one("#filename-input", Input)
+        input_field.display = True
+        input_field.focus()
+        self.filename_input_active = True
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle filename input submission."""
+        if event.input.id != "filename-input" or not self.filename_input_active:
+            return
+
+        filename = event.value.strip()
+        if not filename:
+            self.notify("Please enter a filename", timeout=2)
+            return
+
+        # Add .csv extension if not present
+        if not filename.lower().endswith(".csv"):
+            filename += ".csv"
+
+        # Hide the input field
+        event.input.display = False
+        event.input.value = ""
+        self.filename_input_active = False
+
+        # Save the file
+        self._save_to_file(filename)
+
+    def _save_to_file(self, file_path: str) -> None:
+        """Save selected cells to the specified CSV file."""
+        if not self.selection_active:
+            return
+
+        try:
+            # Create a subset DataFrame with just the selected range
+            selected_df = create_selected_dataframe(self)
+            # Save to file using Polars
+            selected_df.write_csv(file_path, include_header=True)
+            # Clear selection and notify
+            num_rows, num_cols = get_selection_dimensions(self)
+            clear_selection_and_update(self)
+            self.notify(
+                f"Saved {num_rows} rows, {num_cols} columns to {Path(file_path).name}",
+                timeout=2,
+            )
+        except Exception as e:
+            self.notify(f"Error saving file: {e}", timeout=3)
 
     def action_sort_column(self) -> None:
         """Sort the current column."""
@@ -559,11 +685,10 @@ class CSVViewerApp(App):
         total_rows = self.lazy_df.select(pl.len()).collect().item()
         total_cols = len(self.lazy_df.columns)
 
-        start_row = self.current_page * self.PAGE_SIZE + 1
-        end_row = min(
-            (self.current_page + 1) * self.PAGE_SIZE, self.total_filtered_rows
-        )
-        max_page = max(0, (self.total_filtered_rows - 1) // self.PAGE_SIZE)
+        page_size = self._get_adaptive_page_size()
+        start_row = self.current_page * page_size + 1
+        end_row = min((self.current_page + 1) * page_size, self.total_filtered_rows)
+        max_page = max(0, (self.total_filtered_rows - 1) // page_size)
 
         status = self.query_one("#status", Static)
 
