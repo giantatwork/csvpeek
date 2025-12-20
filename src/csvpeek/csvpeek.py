@@ -3,6 +3,7 @@
 csvpeek - A snappy, memory-efficient CSV viewer using Polars and Textual.
 """
 
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -74,6 +75,10 @@ class CSVViewerApp(App):
         self.sorted_column: Optional[str] = None
         self.sorted_descending: bool = False
         self.column_widths: Optional[dict[str, int]] = None
+        # Page caching for performance
+        self.page_cache: dict[int, pl.DataFrame] = {}
+        self.preload_task: Optional[asyncio.Task] = None
+        self.is_preloading: bool = False
 
     def _get_adaptive_page_size(self) -> int:
         """Get adaptive page size based on data complexity."""
@@ -88,6 +93,68 @@ class CSVViewerApp(App):
             return max(35, int(self.PAGE_SIZE * 0.8))
         else:
             return self.PAGE_SIZE
+
+    def _invalidate_page_cache(self) -> None:
+        """Clear page cache when data changes."""
+        self.page_cache.clear()
+        if self.preload_task:
+            self.preload_task.cancel()
+            self.preload_task = None
+        self.is_preloading = False
+
+    async def _preload_adjacent_pages(self) -> None:
+        """Preload next and previous pages in background."""
+        try:
+            self.is_preloading = True
+            self.update_status()  # Update status to show preloading indicator
+
+            page_size = self._get_adaptive_page_size()
+            max_page = max(0, (self.total_filtered_rows - 1) // page_size)
+
+            # Preload next page
+            next_page = self.current_page + 1
+            if next_page <= max_page and next_page not in self.page_cache:
+                offset = next_page * page_size
+                page_df = await asyncio.to_thread(
+                    lambda: self.filtered_lazy.slice(offset, page_size).collect()
+                )
+                self.page_cache[next_page] = page_df.fill_null("")
+
+            # Preload previous page
+            prev_page = self.current_page - 1
+            if prev_page >= 0 and prev_page not in self.page_cache:
+                offset = prev_page * page_size
+                page_df = await asyncio.to_thread(
+                    lambda: self.filtered_lazy.slice(offset, page_size).collect()
+                )
+                self.page_cache[prev_page] = page_df.fill_null("")
+
+            # Manage cache size
+            self._manage_cache_size()
+
+        except asyncio.CancelledError:
+            # Task was cancelled, which is normal
+            pass
+        except Exception:
+            # Ignore preloading errors to avoid disrupting main app
+            pass
+        finally:
+            self.is_preloading = False
+            self.update_status()  # Remove preloading indicator
+
+    def _manage_cache_size(self) -> None:
+        """Keep cache size reasonable by removing distant pages."""
+        MAX_CACHED_PAGES = 5
+
+        if len(self.page_cache) > MAX_CACHED_PAGES:
+            current = self.current_page
+            pages_by_distance = sorted(
+                self.page_cache.keys(), key=lambda p: abs(p - current), reverse=True
+            )
+
+            # Remove furthest pages
+            for page_num in pages_by_distance[MAX_CACHED_PAGES:]:
+                del self.page_cache[page_num]
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
@@ -204,15 +271,20 @@ class CSVViewerApp(App):
                 else:
                     table.add_column(col_label, key=col)
 
-        # Load only the current page of data with adaptive sizing
+        # Try to get data from cache first
         page_size = self._get_adaptive_page_size()
-        offset = self.current_page * page_size
-        page_df = self.filtered_lazy.slice(offset, page_size).collect()
+        if self.current_page in self.page_cache:
+            # Cache hit - instant loading
+            page_df = self.page_cache[self.current_page]
+        else:
+            # Cache miss - load synchronously
+            offset = self.current_page * page_size
+            page_df = self.filtered_lazy.slice(offset, page_size).collect()
+            page_df = page_df.fill_null("")
+            # Store in cache for future use
+            self.page_cache[self.current_page] = page_df
 
-        # Replace None/null values with empty strings
-        page_df = page_df.fill_null("")
-
-        self.cached_page_df = page_df  # Cache for yank operation
+        self.cached_page_df = page_df
 
         # Pre-calculate selection bounds if selection is active
         sel_row_start = sel_row_end = sel_col_start = sel_col_end = None
@@ -269,33 +341,11 @@ class CSVViewerApp(App):
                 table.move_cursor(row=cursor_row, column=cursor_col, animate=False)
             except Exception:
                 pass
-                is_selected = (
-                    self.selection_active
-                    and sel_row_start is not None
-                    and sel_col_start is not None
-                    and sel_row_start <= row_idx <= sel_row_end
-                    and sel_col_start <= col_idx <= sel_col_end
-                )
 
-                # Get filter info for this column if it exists
-                filter_info = self.filter_patterns.get(col_name)
-                if filter_info:
-                    filter_pattern, is_regex = filter_info
-                else:
-                    filter_pattern, is_regex = None, False
-
-                # Style the cell
-                text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
-                styled_row.append(text)
-
-            table.add_row(*styled_row)
-
-        # Restore cursor position
-        if cursor_row is not None and cursor_col is not None:
-            try:
-                table.move_cursor(row=cursor_row, column=cursor_col, animate=False)
-            except Exception:
-                pass
+        # Start preloading adjacent pages in background
+        if self.preload_task:
+            self.preload_task.cancel()
+        self.preload_task = asyncio.create_task(self._preload_adjacent_pages())
 
     def update_selection_styling(self) -> None:
         """Update cell styling for selection without rebuilding the table."""
@@ -386,6 +436,9 @@ class CSVViewerApp(App):
             if active:
                 self.notify(f"Filtering: {active}", timeout=2)
 
+        # Clear page cache when filters change
+        self._invalidate_page_cache()
+
         # Apply filters using the standalone function
         self.filtered_lazy = apply_filters_to_lazyframe(
             self.lazy_df, self.df, self.current_filters
@@ -407,6 +460,7 @@ class CSVViewerApp(App):
         """Reset all filters."""
         self.current_filters = {}
         self.filter_patterns = {}  # Clear filter patterns to remove highlighting
+        self._invalidate_page_cache()  # Clear page cache
         self.filtered_lazy = self.lazy_df
         self.current_page = 0
         self.sorted_column = None
@@ -613,9 +667,9 @@ class CSVViewerApp(App):
             self.notify("Please enter a filename", timeout=2)
             return
 
-        # Add .csv extension if not present
-        if not filename.lower().endswith(".csv"):
-            filename += ".csv"
+        if Path(filename).exists():
+            self.notify(f"File '{filename}' already exists")
+            return
 
         # Hide the input field
         event.input.display = False
@@ -667,6 +721,8 @@ class CSVViewerApp(App):
             self.filtered_lazy = self.filtered_lazy.sort(
                 col_name, descending=self.sorted_descending, nulls_last=True
             )
+            # Invalidate page cache since sort order changed
+            self._invalidate_page_cache()
             # Reset to first page and refresh
             self.current_page = 0
             self.populate_table()
@@ -703,16 +759,19 @@ class CSVViewerApp(App):
             num_cols = col_end - col_start + 1
             selection_text = f"-- SELECT ({num_rows}x{num_cols}) -- | "
 
+        # Add preloading indicator
+        preload_text = "📄 Preloading... | " if self.is_preloading else ""
+
         if self.total_filtered_rows < total_rows:
             status.update(
-                f"{selection_text}{self.total_filtered_rows:,} matches | "
+                f"{preload_text}{selection_text}{self.total_filtered_rows:,} matches | "
                 f"Page {self.current_page + 1}/{max_page + 1} "
                 f"({start_row:,}-{end_row:,} of {self.total_filtered_rows:,} records) | "
                 f"{total_cols} columns"
             )
         else:
             status.update(
-                f"{selection_text}Page {self.current_page + 1}/{max_page + 1} "
+                f"{preload_text}{selection_text}Page {self.current_page + 1}/{max_page + 1} "
                 f"({start_row:,}-{end_row:,} of {total_rows:,} records) | "
                 f"{total_cols} columns"
             )
