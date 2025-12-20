@@ -58,6 +58,7 @@ class CSVViewerApp(App):
         self.filtered_lazy: Optional[pl.LazyFrame] = None
         self.current_page: int = 0
         self.total_filtered_rows: int = 0
+        self.total_rows: int = 0
         self.current_filters: dict[str, str] = {}
         self.filter_patterns: dict[
             str, tuple[str, bool]
@@ -79,6 +80,7 @@ class CSVViewerApp(App):
         self.page_cache: dict[int, pl.DataFrame] = {}
         self.preload_task: Optional[asyncio.Task] = None
         self.is_preloading: bool = False
+        self._columns_initialized: bool = False
 
     def _get_adaptive_page_size(self) -> int:
         """Get adaptive page size based on data complexity."""
@@ -198,7 +200,9 @@ class CSVViewerApp(App):
             self.df = self.lazy_df.head(1).collect()
             # Start with no filters applied
             self.filtered_lazy = self.lazy_df
-            self.total_filtered_rows = self.lazy_df.select(pl.len()).collect().item()
+            # Compute and cache total rows once to avoid repeated full scans
+            self.total_rows = self.lazy_df.select(pl.len()).collect().item()
+            self.total_filtered_rows = self.total_rows
             self.current_page = 0
             self.title = f"csvpeek - {self.csv_path.name}"
             # Calculate column widths from a sample of data
@@ -253,10 +257,11 @@ class CSVViewerApp(App):
         cursor_row = table.cursor_row
         cursor_col = table.cursor_column
 
-        table.clear(columns=True)
+        # Clear only rows; columns remain constant for this app
+        table.clear(columns=False)
 
-        # Add columns with sort indicators and fixed widths
-        if self.df is not None:
+        # Add columns once (they remain stable across pages)
+        if not self._columns_initialized and self.df is not None:
             for col in self.df.columns:
                 # Add sort arrow if this column is sorted
                 if col == self.sorted_column:
@@ -270,6 +275,7 @@ class CSVViewerApp(App):
                     table.add_column(col_label, key=col, width=self.column_widths[col])
                 else:
                     table.add_column(col_label, key=col)
+            self._columns_initialized = True
 
         # Try to get data from cache first
         page_size = self._get_adaptive_page_size()
@@ -332,8 +338,8 @@ class CSVViewerApp(App):
             rows_data.append(styled_row)
 
         # Add all rows at once for better performance
-        for styled_row in rows_data:
-            table.add_row(*styled_row)
+        if rows_data:
+            table.add_rows(rows_data)
 
         # Restore cursor position
         if cursor_row is not None and cursor_col is not None:
@@ -466,7 +472,7 @@ class CSVViewerApp(App):
         self.sorted_column = None
         self.sorted_descending = False
         if self.lazy_df is not None:
-            self.total_filtered_rows = self.lazy_df.select(pl.len()).collect().item()
+            self.total_filtered_rows = self.total_rows
         self.populate_table()
         self.update_status()
 
@@ -723,6 +729,7 @@ class CSVViewerApp(App):
             )
             # Invalidate page cache since sort order changed
             self._invalidate_page_cache()
+            self.columns_need_refresh = True
             # Reset to first page and refresh
             self.current_page = 0
             self.populate_table()
@@ -737,8 +744,8 @@ class CSVViewerApp(App):
         if self.lazy_df is None:
             return
 
-        # Get total rows from lazy frame (fast metadata operation)
-        total_rows = self.lazy_df.select(pl.len()).collect().item()
+        # Use cached total rows to avoid recomputing length on every refresh
+        total_rows = self.total_rows
         total_cols = len(self.lazy_df.columns)
 
         page_size = self._get_adaptive_page_size()

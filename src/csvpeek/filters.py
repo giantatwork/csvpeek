@@ -54,10 +54,12 @@ def apply_filters_to_lazyframe(
                 # Note: (?i) makes the pattern case-insensitive
                 filtered = filtered.filter(pl.col(col).str.contains(f"(?i){pattern}"))
             else:
-                # Literal mode: escape and do case-insensitive substring search
-                escaped_filter = re.escape(filter_value.lower())
+                # Literal mode: case-insensitive substring search using literal contains
+                lower_filter = filter_value.lower()
                 filtered = filtered.filter(
-                    pl.col(col).str.to_lowercase().str.contains(escaped_filter)
+                    pl.col(col)
+                    .str.to_lowercase()
+                    .str.contains(lower_filter, literal=True)
                 )
         except Exception:
             # If filter fails, skip this column
