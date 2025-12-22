@@ -1,6 +1,6 @@
 [project]
 name = "csvpeek"
-version = "0.5.0"
+version = "0.6.0"
 description = "A snappy CSV viewer TUI - peek at your data fast"
 readme = "README.md"
 requires-python = ">=3.12"

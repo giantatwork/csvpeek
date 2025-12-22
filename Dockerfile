@@ -12,7 +12,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 RUN uv tool install csvpeek
 RUN curl -O https://excelbianalytics.com/wp/wp-content/uploads/2017/07/10000-Sales-Records.zip
-RUN 7z e 10000-Sales-Records.zip -o/app
+RUN 7z e 10000-Sales-Records.zip -o/app/sales.csv
 
 # Set the working directory inside the container
 WORKDIR /app
