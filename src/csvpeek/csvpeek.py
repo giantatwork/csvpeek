@@ -660,7 +660,7 @@ class CSVViewerApp:
         dialog = FilterDialog(
             list(self.column_names), self.current_filters.copy(), _on_submit, _on_cancel
         )
-        self.show_overlay(dialog)
+        self.show_overlay(dialog, height=("relative", 80))
 
     def open_help_dialog(self) -> None:
         if self.loop is None:
@@ -805,7 +805,7 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     # Overlay helpers
     # ------------------------------------------------------------------
-    def show_overlay(self, widget: urwid.Widget) -> None:
+    def show_overlay(self, widget: urwid.Widget, height: urwid.RelativeSizing | str | tuple = "pack") -> None:
         if self.loop is None:
             return
         overlay = urwid.Overlay(
@@ -814,7 +814,7 @@ class CSVViewerApp:
             align="center",
             width=("relative", 80),
             valign="middle",
-            height="pack",
+            height=height,
         )
         self.loop.widget = overlay
         self.overlaying = True
