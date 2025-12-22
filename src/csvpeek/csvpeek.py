@@ -40,6 +40,25 @@ class FlowColumns(urwid.Columns):
         return 1
 
 
+class PagingListBox(urwid.ListBox):
+    """ListBox that routes page keys to app-level pagination."""
+
+    def __init__(self, app: "CSVViewerApp", body):
+        self.app = app
+        super().__init__(body)
+
+    def keypress(self, size, key):  # noqa: ANN001
+        if getattr(self.app, "overlaying", False):
+            return super().keypress(size, key)
+        if key in ("page down", "ctrl d"):
+            self.app.next_page()
+            return None
+        if key in ("page up", "ctrl u"):
+            self.app.prev_page()
+            return None
+        return super().keypress(size, key)
+
+
 class FilterDialog(urwid.WidgetWrap):
     """Modal dialog to collect per-column filters."""
 
@@ -57,8 +76,10 @@ class FilterDialog(urwid.WidgetWrap):
 
         self.edits: list[urwid.Edit] = []
         edit_rows = []
+        pad_width = max((len(c) for c in self.columns), default=0) + 1
         for col in self.columns:
-            edit = urwid.Edit(f"{col}: ", current_filters.get(col, ""))
+            label = f"{col.ljust(pad_width)}: "
+            edit = urwid.Edit(label, current_filters.get(col, ""))
             self.edits.append(edit)
             edit_rows.append(urwid.AttrMap(edit, None, focus_map="focus"))
         self.walker = urwid.SimpleFocusListWalker(edit_rows)
@@ -197,7 +218,7 @@ class CSVViewerApp:
         self.loop: Optional[urwid.MainLoop] = None
         self.table_walker = urwid.SimpleFocusListWalker([])
         self.table_header = urwid.Columns([])
-        self.listbox = urwid.ListBox(self.table_walker)
+        self.listbox = PagingListBox(self, self.table_walker)
         self.status_widget = urwid.Text("")
         self.overlaying = False
 
@@ -360,10 +381,6 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
-    def _invalidate_cache(self) -> None:
-        # No caching beyond current page
-        return None
-
     def _build_base_query(self) -> tuple[str, list]:
         where, params = self.filter_where, list(self.filter_params)
         order = ""
@@ -637,7 +654,6 @@ class CSVViewerApp:
         self.sorted_descending = False
         self.filter_where = ""
         self.filter_params = []
-        self._invalidate_cache()
         self.current_page = 0
         self.cursor_row = 0
         self.total_filtered_rows = self.total_rows
@@ -655,7 +671,6 @@ class CSVViewerApp:
         else:
             self.sorted_column = col_name
             self.sorted_descending = False
-        self._invalidate_cache()
         self.current_page = 0
         self.cursor_row = 0
         self._refresh_rows()
@@ -778,6 +793,7 @@ class CSVViewerApp:
             f"{selection_text}Page {self.current_page + 1}/{max_page + 1} "
             f"({start:,}-{end:,} of {self.total_filtered_rows:,}) | "
             f"Columns: {len(self.column_names) if self.column_names else '…'}"
+            " Press ? for help"
         )
         self.status_widget.set_text(status)
 
