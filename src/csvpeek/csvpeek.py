@@ -127,6 +127,38 @@ class FilenameDialog(urwid.WidgetWrap):
         return super().keypress(size, key)
 
 
+class HelpDialog(urwid.WidgetWrap):
+    """Modal dialog listing keyboard shortcuts."""
+
+    def __init__(self, on_close: Callable[[], None]) -> None:
+        shortcuts = [
+            ("?", "Show this help"),
+            ("q", "Quit"),
+            ("r", "Reset filters"),
+            ("/", "Open filter dialog"),
+            ("s", "Sort by current column (toggle asc/desc)"),
+            ("c", "Copy cell or selection"),
+            ("w", "Save selection to CSV"),
+            ("←/→/↑/↓", "Move cursor"),
+            ("Shift + arrows", "Extend selection"),
+            ("PgUp / Ctrl+U", "Previous page"),
+            ("PgDn / Ctrl+D", "Next page"),
+        ]
+        rows = [urwid.Text("Keyboard Shortcuts", align="center"), urwid.Divider()]
+        for key, desc in shortcuts:
+            rows.append(urwid.Columns([(12, urwid.Text(key)), urwid.Text(desc)]))
+        body = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
+        boxed = urwid.LineBox(body)
+        self.on_close = on_close
+        super().__init__(boxed)
+
+    def keypress(self, size, key):  # noqa: ANN001
+        if key in ("esc", "enter", "q", "?", "ctrl g"):
+            self.on_close()
+            return None
+        return super().keypress(size, key)
+
+
 class CSVViewerApp:
     """Urwid-based CSV viewer with filtering, sorting, and selection."""
 
@@ -205,7 +237,7 @@ class CSVViewerApp:
             self.column_names = [row[1] for row in info]
             self.total_rows = self.con.execute(
                 f"SELECT count(*) FROM {self.table_name}"
-            ).fetchone()[0]
+            ).fetchone()[0]  # type: ignore
             self.total_filtered_rows = self.total_rows
             self._calculate_column_widths()
         except Exception as exc:  # noqa: BLE001
@@ -486,6 +518,9 @@ class CSVViewerApp:
         if key in ("w", "W"):
             self.save_selection_dialog()
             return
+        if key == "?":
+            self.open_help_dialog()
+            return
         if key in (
             "left",
             "right",
@@ -561,6 +596,16 @@ class CSVViewerApp:
         )
         self.show_overlay(dialog)
 
+    def open_help_dialog(self) -> None:
+        if self.loop is None:
+            return
+
+        def _on_close() -> None:
+            self.close_overlay()
+
+        dialog = HelpDialog(_on_close)
+        self.show_overlay(dialog)
+
     def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
         if not self.con:
             return
@@ -580,7 +625,7 @@ class CSVViewerApp:
         self.filter_where = where
         self.filter_params = params
         count_query = f"SELECT count(*) FROM {self.table_name}{where}"
-        self.total_filtered_rows = self.con.execute(count_query, params).fetchone()[0]
+        self.total_filtered_rows = self.con.execute(count_query, params).fetchone()[0]  # type: ignore
         self.current_page = 0
         self.cursor_row = 0
         self._refresh_rows()
@@ -749,7 +794,7 @@ class CSVViewerApp:
                 ("status", "light gray", "dark gray"),
                 ("cell_selected", "black", "yellow"),
                 ("filter", "light red", "default"),
-                ("focus", "black", "light cyan"),
+                ("focus", "white", "dark blue"),
             ],
             unhandled_input=self.handle_input,
         )
