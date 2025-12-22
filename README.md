@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 
-**Csvpeek** is a snappy, memory-efficient CSV viewer built for speed. Powered by [Polars](https://pola.rs/) for lightning-fast data operations and [Textual](https://textual.textualize.io/) for a modern terminal UI.
+**Csvpeek** is a snappy, memory-efficient CSV viewer built for speed. Powered by [Polars](https://pola.rs/) for lightning-fast data operations and [Urwid](https://urwid.org/) for a lean terminal UI.
 
 ## ✨ Features
 
@@ -94,11 +94,9 @@ csvpeek is designed for performance and maintainability:
 
 ```
 csvpeek/
-├── csvpeek.py          # Main application and data operations
-├── filter_modal.py     # Filter dialog UI component
-├── styling.py          # Cell styling utilities
-├── styles.py           # CSS styling constants
-└── main.py            # Entry point
+├── csvpeek.py          # Main Urwid application and data operations
+├── selection_utils.py  # Selection helpers
+└── main.py             # Entry point
 ```
 
 ### Key Design Decisions
@@ -112,8 +110,7 @@ csvpeek/
 
 - Python 3.10+
 - Polars >= 0.19.0
-- Textual >= 0.47.0
-- Rich
+- Urwid >= 2.1.0
 - Pyperclip >= 1.9.0
 
 ## 🎨 Performance
@@ -151,8 +148,7 @@ MIT License - see LICENSE file for details
 
 Built with amazing open-source tools:
 - [Polars](https://pola.rs/) - Lightning-fast DataFrames
-- [Textual](https://textual.textualize.io/) - Modern TUI framework
-- [Rich](https://rich.readthedocs.io/) - Beautiful terminal formatting
+- [Urwid](https://urwid.org/) - Lightweight terminal UI toolkit
 
 ## 📬 Contact
 
@@ -199,7 +195,7 @@ python csvpeek.py data.csv
 
 - Python 3.10+
 - polars >= 0.19.0
-- textual >= 0.47.0
+- urwid >= 2.1.0
 - pyperclip >= 1.8.0
 
 

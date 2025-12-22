@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-csvpeek - A snappy, memory-efficient CSV viewer using Polars and Textual.
+csvpeek - A snappy, memory-efficient CSV viewer using Polars and Urwid.
 """
 
-import asyncio
+from __future__ import annotations
+
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import polars as pl
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, Input, Static
+import pyperclip
+import urwid
 
-from csvpeek.filter_modal import FilterModal
 from csvpeek.filters import apply_filters_to_lazyframe
 from csvpeek.selection_utils import (
     clear_selection_and_update,
@@ -21,839 +20,732 @@ from csvpeek.selection_utils import (
     get_selection_dimensions,
     get_single_cell_value,
 )
-from csvpeek.styles import APP_CSS
-from csvpeek.styling import style_cell
 
 
-class CSVViewerApp(App):
-    """A Textual app to view and filter CSV files."""
+def _truncate(text: str, width: int) -> str:
+    """Truncate and pad text to a fixed width."""
+    if len(text) > width:
+        return text[: width - 1] + "…"
+    return text.ljust(width)
 
-    CSS = APP_CSS
 
-    BINDINGS = [
-        Binding("q", "quit", "Quit", priority=True),
-        Binding("r", "reset_filters", "Reset Filters"),
-        Binding("slash", "show_filters", "Filters"),
-        Binding("ctrl+d", "next_page", "Next Page", priority=True),
-        Binding("ctrl+u", "prev_page", "Prev Page", priority=True),
-        Binding("c", "copy_selection", "Copy", priority=True),
-        Binding("w", "save_selection", "Save", priority=True),
-        Binding("left", "move_left", "Move left", priority=True, show=False),
-        Binding("right", "move_right", "Move right", priority=True, show=False),
-        Binding("up", "move_up", "Move up", priority=True, show=False),
-        Binding("down", "move_down", "Move down", priority=True, show=False),
-        Binding("shift+left", "select_left", "Select", priority=True),
-        Binding("shift+right", "select_right", "Select", priority=True, show=False),
-        Binding("shift+up", "select_up", "Select", priority=True, show=False),
-        Binding("shift+down", "select_down", "Select", priority=True, show=False),
-        Binding("s", "sort_column", "Sort column", priority=True, show=False),
-    ]
+class FlowColumns(urwid.Columns):
+    """Columns that behave as a 1-line flow widget for ListBox rows."""
 
-    PAGE_SIZE = 50  # Number of rows to load per page (base size)
+    sizing = frozenset(["flow"])
+
+    def rows(self, size, focus=False):  # noqa: ANN001, D401
+        return 1
+
+
+class FilterDialog(urwid.WidgetWrap):
+    """Modal dialog to collect per-column filters."""
+
+    def __init__(
+        self,
+        columns: list[str],
+        current_filters: dict[str, str],
+        on_submit: Callable[[dict[str, str]], None],
+        on_cancel: Callable[[], None],
+    ) -> None:
+        self.columns = columns
+        self.current_filters = current_filters
+        self.on_submit = on_submit
+        self.on_cancel = on_cancel
+
+        self.edits: list[urwid.Edit] = []
+        edit_rows = []
+        for col in self.columns:
+            edit = urwid.Edit(f"{col}: ", current_filters.get(col, ""))
+            self.edits.append(edit)
+            edit_rows.append(urwid.AttrMap(edit, None, focus_map="focus"))
+        self.walker = urwid.SimpleFocusListWalker(edit_rows)
+        listbox = urwid.ListBox(self.walker)
+        instructions = urwid.Padding(
+            urwid.Text("Tab to move, Enter to apply, Esc to cancel"), left=1, right=1
+        )
+        frame = urwid.Frame(body=listbox, header=instructions)
+        boxed = urwid.LineBox(frame, title="Filters")
+        super().__init__(boxed)
+
+    def keypress(self, size, key):  # noqa: ANN001
+        if key == "tab":
+            self._move_focus(1)
+            return None
+        if key == "shift tab":
+            self._move_focus(-1)
+            return None
+        if key in ("enter",):
+            filters = {
+                col: edit.edit_text for col, edit in zip(self.columns, self.edits)
+            }
+            self.on_submit(filters)
+            return None
+        if key in ("esc", "ctrl g"):
+            self.on_cancel()
+            return None
+        return super().keypress(size, key)
+
+    def _move_focus(self, delta: int) -> None:
+        if not self.walker:
+            return
+        focus = self.walker.focus or 0
+        self.walker.focus = (focus + delta) % len(self.walker)
+
+
+class FilenameDialog(urwid.WidgetWrap):
+    """Modal dialog for choosing a filename."""
+
+    def __init__(
+        self,
+        prompt: str,
+        on_submit: Callable[[str], None],
+        on_cancel: Callable[[], None],
+    ) -> None:
+        self.edit = urwid.Edit(f"{prompt}: ")
+        self.on_submit = on_submit
+        self.on_cancel = on_cancel
+        pile = urwid.Pile(
+            [
+                urwid.Text("Enter filename and press Enter"),
+                urwid.Divider(),
+                urwid.AttrMap(self.edit, None, focus_map="focus"),
+            ]
+        )
+        boxed = urwid.LineBox(pile, title="Save Selection")
+        super().__init__(urwid.Filler(boxed, valign="top"))
+
+    def keypress(self, size, key):  # noqa: ANN001
+        if key in ("enter",):
+            self.on_submit(self.edit.edit_text.strip())
+            return None
+        if key in ("esc", "ctrl g"):
+            self.on_cancel()
+            return None
+        return super().keypress(size, key)
+
+
+class CSVViewerApp:
+    """Urwid-based CSV viewer with filtering, sorting, and selection."""
+
+    PAGE_SIZE = 50
 
     def __init__(self, csv_path: str) -> None:
-        super().__init__()
         self.csv_path = Path(csv_path)
         self.df: Optional[pl.DataFrame] = None
         self.lazy_df: Optional[pl.LazyFrame] = None
         self.filtered_lazy: Optional[pl.LazyFrame] = None
-        self.current_page: int = 0
-        self.total_filtered_rows: int = 0
-        self.total_rows: int = 0
-        # Filters keyed by sanitized column names (Textual-safe)
-        self.current_filters: dict[str, str] = {}
-        self.filter_patterns: dict[
-            str, tuple[str, bool]
-        ] = {}  # col -> (pattern, is_regex)
         self.cached_page_df: Optional[pl.DataFrame] = None
-        # Selection tracking
-        self.selection_active: bool = False
+        self.column_names: list[str] = []
+
+        self.current_page = 0
+        self.total_rows = 0
+        self.total_filtered_rows = 0
+        self.page_cache: dict[int, pl.DataFrame] = {}
+
+        self.current_filters: dict[str, str] = {}
+        self.filter_patterns: dict[str, tuple[str, bool]] = {}
+        self.sorted_column: Optional[str] = None
+        self.sorted_descending = False
+        self.column_widths: dict[str, int] = {}
+        self.col_offset = 0  # horizontal scroll offset (column index)
+
+        # Selection and cursor state
+        self.selection_active = False
         self.selection_start_row: Optional[int] = None
         self.selection_start_col: Optional[int] = None
         self.selection_end_row: Optional[int] = None
         self.selection_end_col: Optional[int] = None
-        # Filename input tracking
-        self.filename_input_active: bool = False
-        self.sort_order_descending: bool = False
-        self.sorted_column: Optional[str] = None
-        self.sorted_descending: bool = False
-        self.column_widths: Optional[dict[str, int]] = None
-        # Page caching for performance
-        self.page_cache: dict[int, pl.DataFrame] = {}
-        self.preload_task: Optional[asyncio.Task] = None
-        self.is_preloading: bool = False
-        self._columns_initialized: bool = False
-        # Column key mapping to satisfy Textual identifier rules
-        self._column_keys: dict[str, str] = {}
-        self._column_key_used: set[str] = set()
+        self.cursor_row = 0
+        self.cursor_col = 0
 
-    def _sanitize_column_key(self, name: str) -> str:
-        """Sanitize column name to a Textual-safe identifier."""
-        base = re.sub(r"[^0-9A-Za-z_-]", "_", name)
-        if not base:
-            base = "col"
-        if base[0].isdigit():
-            base = f"col_{base}"
-        return base
+        # UI state
+        self.loop: Optional[urwid.MainLoop] = None
+        self.table_walker = urwid.SimpleFocusListWalker([])
+        self.table_header = urwid.Columns([])
+        self.listbox = urwid.ListBox(self.table_walker)
+        self.status_widget = urwid.Text("")
+        self.overlaying = False
 
-    def _get_column_key(self, name: str) -> str:
-        """Return a stable, unique, sanitized column key for DataTable."""
-        if name in self._column_keys:
-            return self._column_keys[name]
-
-        base = self._sanitize_column_key(name)
-        candidate = base
-        counter = 1
-        while candidate in self._column_key_used:
-            candidate = f"{base}_{counter}"
-            counter += 1
-
-        self._column_keys[name] = candidate
-        self._column_key_used.add(candidate)
-        return candidate
-
-    def _column_key_to_name(self) -> dict[str, str]:
-        """Reverse mapping from sanitized key to original column name."""
-        return {v: k for k, v in self._column_keys.items()}
-
-    def _get_adaptive_page_size(self) -> int:
-        """Get adaptive page size based on data complexity."""
-        if self.df is None:
-            return self.PAGE_SIZE
-
-        # Reduce page size for very wide tables to improve performance
-        num_cols = len(self.df.columns)
-        if num_cols > 20:
-            return max(25, self.PAGE_SIZE // 2)
-        elif num_cols > 10:
-            return max(35, int(self.PAGE_SIZE * 0.8))
-        else:
-            return self.PAGE_SIZE
-
-    def _invalidate_page_cache(self) -> None:
-        """Clear page cache when data changes."""
-        self.page_cache.clear()
-        if self.preload_task:
-            self.preload_task.cancel()
-            self.preload_task = None
-        self.is_preloading = False
-
-    async def _preload_adjacent_pages(self) -> None:
-        """Preload next and previous pages in background."""
-        try:
-            self.is_preloading = True
-            self.update_status()  # Update status to show preloading indicator
-
-            page_size = self._get_adaptive_page_size()
-            max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-
-            # Preload next page
-            next_page = self.current_page + 1
-            if next_page <= max_page and next_page not in self.page_cache:
-                offset = next_page * page_size
-                page_df = await asyncio.to_thread(
-                    lambda: self.filtered_lazy.slice(offset, page_size).collect()
-                )
-                self.page_cache[next_page] = page_df.fill_null("")
-
-            # Preload previous page
-            prev_page = self.current_page - 1
-            if prev_page >= 0 and prev_page not in self.page_cache:
-                offset = prev_page * page_size
-                page_df = await asyncio.to_thread(
-                    lambda: self.filtered_lazy.slice(offset, page_size).collect()
-                )
-                self.page_cache[prev_page] = page_df.fill_null("")
-
-            # Manage cache size
-            self._manage_cache_size()
-
-        except asyncio.CancelledError:
-            # Task was cancelled, which is normal
-            pass
-        except Exception:
-            # Ignore preloading errors to avoid disrupting main app
-            pass
-        finally:
-            self.is_preloading = False
-            self.update_status()  # Remove preloading indicator
-
-    def _manage_cache_size(self) -> None:
-        """Keep cache size reasonable by removing distant pages."""
-        MAX_CACHED_PAGES = 5
-
-        if len(self.page_cache) > MAX_CACHED_PAGES:
-            current = self.current_page
-            pages_by_distance = sorted(
-                self.page_cache.keys(), key=lambda p: abs(p - current), reverse=True
-            )
-
-            # Remove furthest pages
-            for page_num in pages_by_distance[MAX_CACHED_PAGES:]:
-                del self.page_cache[page_num]
-
-    def compose(self) -> ComposeResult:
-        """Create child widgets."""
-        yield Header()
-        yield DataTable(id="data-table")
-        yield Static("", id="status")
-        yield Input(
-            placeholder="Enter filename to save (e.g., output.csv)", id="filename-input"
-        )
-        yield Footer()
-
-    def on_mount(self) -> None:
-        """Load CSV and populate table."""
-        # Hide filename input initially
-        input_field = self.query_one("#filename-input", Input)
-        input_field.display = False
-
-        self.load_csv()
-        self.populate_table()
-        self.update_status()
-
-    def on_key(self, event) -> None:
-        """Handle key events."""
-        if event.key == "escape" and self.filename_input_active:
-            # Hide the filename input field
-            input_field = self.query_one("#filename-input", Input)
-            input_field.display = False
-            input_field.value = ""
-            self.filename_input_active = False
-            event.prevent_default()
-
+    # ------------------------------------------------------------------
+    # Data loading and preparation
+    # ------------------------------------------------------------------
     def load_csv(self) -> None:
-        """Load CSV file using Polars."""
         try:
-            # Use Polars lazy API for efficient filtering
-            # Load all columns as strings to avoid type inference issues
             self.lazy_df = pl.scan_csv(
                 self.csv_path, schema_overrides={}, infer_schema_length=0
             )
-            # Only load a small sample for metadata (columns and dtypes)
+            # Cache column names without triggering repeated schema resolution
+            self.column_names = self.lazy_df.collect_schema().names()
             self.df = self.lazy_df.head(1).collect()
-            # Start with no filters applied
             self.filtered_lazy = self.lazy_df
-            # Compute and cache total rows once to avoid repeated full scans
             self.total_rows = self.lazy_df.select(pl.len()).collect().item()
             self.total_filtered_rows = self.total_rows
-            self.current_page = 0
-            self.title = f"csvpeek - {self.csv_path.name}"
-            # Calculate column widths from a sample of data
             self._calculate_column_widths()
-        except Exception as e:
-            self.exit(message=f"Error loading CSV: {e}")
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"Error loading CSV: {exc}") from exc
 
     def _calculate_column_widths(self) -> None:
-        """Calculate optimal column widths based on a sample of data."""
         if self.lazy_df is None or self.df is None:
             return
+        sample_size = min(1000, self.total_filtered_rows)
+        sample_df = self.lazy_df.head(sample_size).collect()
 
-        try:
-            # Sample data from different parts of the file for better width estimation
-            sample_size = min(1000, self.total_filtered_rows)
-            sample_df = self.lazy_df.head(sample_size).collect()
-
-            self.column_widths = {}
-            for col in self.df.columns:
-                # Calculate max width needed for this column
-                # Consider column header length + arrow space
-                header_len = len(col) + 3  # +3 for potential sort arrow
-
-                # Get max value length in the sample
-                if col in sample_df.columns:
-                    # All columns are already strings, no need to cast
-                    max_val_len = sample_df[col].str.len_chars().max()
-                    if max_val_len is not None:
-                        content_len = max_val_len
-                    else:
-                        content_len = 0
-                else:
-                    content_len = 0
-
-                # Use the larger of header or content, with reasonable bounds
-                width = max(header_len, content_len)
-                width = max(10, min(width, 50))  # Between 10 and 50 characters
-
-                self.column_widths[col] = width
-        except Exception:
-            # If calculation fails, don't use fixed widths
-            self.column_widths = None
-
-    def populate_table(self) -> None:
-        """Populate the data table with current page of data."""
-        if self.filtered_lazy is None:
-            return
-
-        table = self.query_one("#data-table", DataTable)
-
-        # Save cursor position
-        cursor_row = table.cursor_row
-        cursor_col = table.cursor_column
-
-        # Clear only rows; columns remain constant for this app
-        table.clear(columns=False)
-
-        # Add columns once (they remain stable across pages)
-        if not self._columns_initialized and self.df is not None:
-            for col in self.df.columns:
-                # Add sort arrow if this column is sorted
-                if col == self.sorted_column:
-                    arrow = " ▼" if self.sorted_descending else " ▲"
-                    col_label = f"{col}{arrow}"
-                else:
-                    col_label = col
-
-                # Use cached column width if available
-                column_key = self._get_column_key(col)
-
-                if self.column_widths and col in self.column_widths:
-                    table.add_column(
-                        col_label, key=column_key, width=self.column_widths[col]
-                    )
-                else:
-                    table.add_column(col_label, key=column_key)
-            self._columns_initialized = True
-
-        # Try to get data from cache first
-        page_size = self._get_adaptive_page_size()
-        if self.current_page in self.page_cache:
-            # Cache hit - instant loading
-            page_df = self.page_cache[self.current_page]
-        else:
-            # Cache miss - load synchronously
-            offset = self.current_page * page_size
-            page_df = self.filtered_lazy.slice(offset, page_size).collect()
-            page_df = page_df.fill_null("")
-            # Store in cache for future use
-            self.page_cache[self.current_page] = page_df
-
-        self.cached_page_df = page_df
-
-        # Pre-calculate selection bounds if selection is active
-        sel_row_start = sel_row_end = sel_col_start = sel_col_end = None
-        if self.selection_active:
-            sel_row_start = min(self.selection_start_row, self.selection_end_row)
-            sel_row_end = max(self.selection_start_row, self.selection_end_row)
-            sel_col_start = min(self.selection_start_col, self.selection_end_col)
-            sel_col_end = max(self.selection_start_col, self.selection_end_col)
-
-        # Pre-compile filter patterns for performance
-        filter_patterns = {}
-        for col_name, (pattern, is_regex) in self.filter_patterns.items():
-            if pattern:
-                filter_patterns[col_name] = (pattern, is_regex)
-
-        # Add rows with highlighted matches - batch process for better performance
-        rows_data = []
-        for row_idx, row in enumerate(page_df.iter_rows()):
-            styled_row = []
-            for col_idx, cell in enumerate(row):
-                if col_idx >= len(self.df.columns):
-                    break  # Safety check
-                col_name = self.df.columns[col_idx]
-                cell_str = cell
-
-                # Check if this cell is in the selection
-                is_selected = (
-                    self.selection_active
-                    and sel_row_start is not None
-                    and sel_col_start is not None
-                    and sel_row_start <= row_idx <= sel_row_end
-                    and sel_col_start <= col_idx <= sel_col_end
-                )
-
-                # Get filter info for this column if it exists
-                filter_info = filter_patterns.get(col_name)
-                if filter_info:
-                    filter_pattern, is_regex = filter_info
-                else:
-                    filter_pattern, is_regex = None, False
-
-                # Style the cell
-                text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
-                styled_row.append(text)
-            rows_data.append(styled_row)
-
-        # Add all rows at once for better performance
-        if rows_data:
-            table.add_rows(rows_data)
-
-        # Restore cursor position
-        if cursor_row is not None and cursor_col is not None:
-            try:
-                table.move_cursor(row=cursor_row, column=cursor_col, animate=False)
-            except Exception:
-                pass
-
-        # Start preloading adjacent pages in background
-        if self.preload_task:
-            self.preload_task.cancel()
-        self.preload_task = asyncio.create_task(self._preload_adjacent_pages())
-
-    def update_selection_styling(self) -> None:
-        """Update cell styling for selection without rebuilding the table."""
-        if self.cached_page_df is None or self.df is None:
-            return
-
-        table = self.query_one("#data-table", DataTable)
-
-        # Calculate old and new selection bounds
-        old_selection = getattr(self, "_last_selection_cells", set())
-        new_selection = set()
-
-        if self.selection_active:
-            sel_row_start = min(self.selection_start_row, self.selection_end_row)
-            sel_row_end = max(self.selection_start_row, self.selection_end_row)
-            sel_col_start = min(self.selection_start_col, self.selection_end_col)
-            sel_col_end = max(self.selection_start_col, self.selection_end_col)
-
-            for row_idx in range(sel_row_start, sel_row_end + 1):
-                for col_idx in range(sel_col_start, sel_col_end + 1):
-                    new_selection.add((row_idx, col_idx))
-
-        # Find cells that changed state
-        cells_to_update = old_selection.symmetric_difference(new_selection)
-
-        # Cache filter patterns for performance
-        filter_patterns = {}
-        for col_name, (pattern, is_regex) in self.filter_patterns.items():
-            if pattern:
-                filter_patterns[col_name] = (pattern, is_regex)
-
-        # Update only changed cells - batch updates for better performance
-        updates = []
-        for row_idx, col_idx in cells_to_update:
-            if row_idx >= self.cached_page_df.height or col_idx >= len(self.df.columns):
-                continue
-
-            cell_value = self.cached_page_df.row(row_idx)[col_idx]
-            cell_str = "" if cell_value is None else str(cell_value)
-            col_name = self.df.columns[col_idx]
-            is_selected = (row_idx, col_idx) in new_selection
-
-            # Get filter info for this column
-            filter_info = filter_patterns.get(col_name)
-            if filter_info:
-                filter_pattern, is_regex = filter_info
+        self.column_widths = {}
+        for col in self.df.columns:
+            header_len = len(col) + 2
+            if col in sample_df.columns:
+                max_len = sample_df[col].str.len_chars().max() or 0
             else:
-                filter_pattern, is_regex = None, False
+                max_len = 0
+            width = max(header_len, max_len)
+            width = max(8, min(int(width), 40))
+            self.column_widths[col] = width
 
-            # Style the cell
-            text = style_cell(cell_str, is_selected, filter_pattern, is_regex)
-            updates.append((row_idx, col_idx, text))
+    def _get_adaptive_page_size(self) -> int:
+        if self.df is None:
+            return self.PAGE_SIZE
+        num_cols = len(self.df.columns)
+        if num_cols > 20:
+            return max(20, self.PAGE_SIZE // 2)
+        if num_cols > 10:
+            return max(30, int(self.PAGE_SIZE * 0.8))
+        return self.PAGE_SIZE
 
-        # Apply all updates at once
-        for row_idx, col_idx, text in updates:
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+    def build_ui(self) -> urwid.Widget:
+        header_text = urwid.Text(f"csvpeek - {self.csv_path.name}", align="center")
+        header = urwid.AttrMap(header_text, "header")
+        self.table_header = self._build_header_row(self._current_screen_width())
+        body = urwid.Pile(
+            [
+                ("pack", self.table_header),
+                ("pack", urwid.Divider("─")),
+                self.listbox,
+            ]
+        )
+        footer = urwid.AttrMap(self.status_widget, "status")
+        return urwid.Frame(body=body, header=header, footer=footer)
+
+    def _build_header_row(self, max_width: Optional[int] = None) -> urwid.Columns:
+        if self.df is None:
+            return urwid.Columns([])
+        if max_width is None:
+            max_width = self._current_screen_width()
+        cols = []
+        for col in self._visible_column_names(max_width):
+            label = col
+            if self.sorted_column == col:
+                label = f"{col} {'▼' if self.sorted_descending else '▲'}"
+            width = self.column_widths.get(col, 12)
+            cols.append((width, urwid.Text(_truncate(label, width), wrap="clip")))
+        return urwid.Columns(cols, dividechars=1)
+
+    def _current_screen_width(self) -> int:
+        if self.loop and self.loop.screen:
+            cols, _rows = self.loop.screen.get_cols_rows()
+            return max(cols, 40)
+        return 80
+
+    def _visible_column_names(self, max_width: int) -> list[str]:
+        if self.df is None:
+            return []
+        names = list(self.df.columns)
+        widths = [self.column_widths.get(c, 12) for c in names]
+        divide = 1
+        start = min(self.col_offset, len(names) - 1 if names else 0)
+
+        # Ensure the current cursor column is within view
+        self._ensure_cursor_visible(max_width, widths)
+        start = self.col_offset
+
+        chosen: list[str] = []
+        used = 0
+        for idx in range(start, len(names)):
+            w = widths[idx]
+            extra = w if not chosen else w + divide
+            if used + extra > max_width and chosen:
+                break
+            chosen.append(names[idx])
+            used += extra
+        if not chosen and names:
+            chosen.append(names[start])
+        return chosen
+
+    def _ensure_cursor_visible(self, max_width: int, widths: list[int]) -> None:
+        if not widths:
+            return
+        divide = 1
+        col = min(self.cursor_col, len(widths) - 1)
+        # Adjust left boundary when cursor is left of offset
+        if col < self.col_offset:
+            self.col_offset = col
+            return
+
+        # If cursor is off to the right, shift offset until it fits
+        while True:
+            total = 0
+            for idx in range(self.col_offset, col + 1):
+                total += widths[idx]
+                if idx > self.col_offset:
+                    total += divide
+            if total <= max_width or self.col_offset == col:
+                break
+            self.col_offset += 1
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+    def _invalidate_cache(self) -> None:
+        self.page_cache.clear()
+
+    def _get_page_df(self) -> Optional[pl.DataFrame]:
+        if self.filtered_lazy is None:
+            return None
+        page_size = self._get_adaptive_page_size()
+        max_page = max(0, (self.total_filtered_rows - 1) // page_size)
+        self.current_page = min(self.current_page, max_page)
+        if self.current_page in self.page_cache:
+            return self.page_cache[self.current_page]
+        offset = self.current_page * page_size
+        page_df = self.filtered_lazy.slice(offset, page_size).collect().fill_null("")
+        self.page_cache[self.current_page] = page_df
+        return page_df
+
+    def _refresh_rows(self) -> None:
+        page_df = self._get_page_df()
+        if page_df is None or self.df is None:
+            return
+        max_width = self._current_screen_width()
+        self.cached_page_df = page_df
+        self.table_walker.clear()
+        # Clamp cursor within available data
+        self.cursor_row = min(self.cursor_row, max(0, page_df.height - 1))
+        self.cursor_col = min(self.cursor_col, max(0, len(self.df.columns) - 1))
+
+        visible_cols = self._visible_column_names(max_width)
+        vis_indices = [self.df.columns.index(c) for c in visible_cols]
+
+        for row_idx, row in enumerate(page_df.iter_rows()):
+            row_widget = self._build_row_widget(row_idx, row, vis_indices)
+            self.table_walker.append(row_widget)
+
+        if self.table_walker:
+            self.table_walker.set_focus(self.cursor_row)
+        self.table_header = self._build_header_row(max_width)
+        if self.loop:
+            frame_widget = self.loop.widget
+            if isinstance(frame_widget, urwid.Overlay):
+                frame_widget = frame_widget.bottom_w
+            if isinstance(frame_widget, urwid.Frame):
+                frame_widget.body.contents[0] = (
+                    self.table_header,
+                    frame_widget.body.options("pack"),
+                )
+        self._update_status()
+
+    def _build_row_widget(
+        self, row_idx: int, row: tuple, vis_indices: list[int]
+    ) -> urwid.Widget:
+        if self.df is None:
+            return urwid.Text("")
+        cells = []
+        for col_idx in vis_indices:
+            col_name = self.df.columns[col_idx]
+            width = self.column_widths.get(col_name, 12)
+            cell = row[col_idx]
+            is_selected = self._cell_selected(row_idx, col_idx)
+            filter_info = self.filter_patterns.get(col_name)
+            markup = self._cell_markup(str(cell or ""), width, filter_info, is_selected)
+            text = urwid.Text(markup, wrap="clip")
+            cells.append((width, text))
+        return FlowColumns(cells, dividechars=1)
+
+    def _cell_selected(self, row_idx: int, col_idx: int) -> bool:
+        if not self.selection_active:
+            return row_idx == self.cursor_row and col_idx == self.cursor_col
+        row_start, row_end, col_start, col_end = get_selection_dimensions(
+            self, as_bounds=True
+        )
+        return row_start <= row_idx <= row_end and col_start <= col_idx <= col_end
+
+    def _cell_markup(
+        self,
+        cell_str: str,
+        width: int,
+        filter_info: Optional[tuple[str, bool]],
+        is_selected: bool,
+    ):
+        truncated = _truncate(cell_str, width)
+        if is_selected:
+            return [("cell_selected", truncated)]
+
+        if not filter_info:
+            return truncated
+
+        pattern, is_regex = filter_info
+        matches = []
+        if is_regex:
             try:
-                table.update_cell_at((row_idx, col_idx), text, update_width=False)
-            except Exception:
-                # Cell might not exist or be out of bounds
-                pass
+                for m in re.finditer(pattern, truncated, re.IGNORECASE):
+                    matches.append((m.start(), m.end()))
+            except re.error:
+                matches = []
+        else:
+            lower_cell = truncated.lower()
+            lower_filter = pattern.lower()
+            start = 0
+            while True:
+                pos = lower_cell.find(lower_filter, start)
+                if pos == -1:
+                    break
+                matches.append((pos, pos + len(lower_filter)))
+                start = pos + 1
 
-        # Cache current selection for next update
-        self._last_selection_cells = new_selection
+        if not matches:
+            return truncated
+
+        segments = []
+        last = 0
+        for start, end in matches:
+            if start > last:
+                segments.append(truncated[last:start])
+            segments.append(("filter", truncated[start:end]))
+            last = end
+        if last < len(truncated):
+            segments.append(truncated[last:])
+        return segments
+
+    # ------------------------------------------------------------------
+    # Interaction handlers
+    # ------------------------------------------------------------------
+    def handle_input(self, key: str) -> None:
+        if self.overlaying:
+            return
+        if key in ("q", "Q"):
+            raise urwid.ExitMainLoop()
+        if key in ("r", "R"):
+            self.reset_filters()
+            return
+        if key == "s":
+            self.sort_current_column()
+            return
+        if key in ("/",):
+            self.open_filter_dialog()
+            return
+        if key in ("ctrl d", "page down"):
+            self.next_page()
+            return
+        if key in ("ctrl u", "page up"):
+            self.prev_page()
+            return
+        if key in ("c", "C"):
+            self.copy_selection()
+            return
+        if key in ("w", "W"):
+            self.save_selection_dialog()
+            return
+        if key in (
+            "left",
+            "right",
+            "up",
+            "down",
+            "shift left",
+            "shift right",
+            "shift up",
+            "shift down",
+        ):
+            self.move_cursor(key)
+
+    def move_cursor(self, key: str) -> None:
+        extend = key.startswith("shift")
+        if extend and not self.selection_active:
+            self.selection_active = True
+            self.selection_start_row = self.cursor_row
+            self.selection_start_col = self.cursor_col
+
+        cols = len(self.df.columns) if self.df is not None else 0
+        rows = self.cached_page_df.height if self.cached_page_df is not None else 0
+
+        if key.endswith("left"):
+            self.cursor_col = max(0, self.cursor_col - 1)
+        if key.endswith("right"):
+            self.cursor_col = min(cols - 1, self.cursor_col + 1)
+        if key.endswith("up"):
+            self.cursor_row = max(0, self.cursor_row - 1)
+        if key.endswith("down"):
+            self.cursor_row = min(rows - 1, self.cursor_row + 1)
+
+        if not extend:
+            self.selection_active = False
+        else:
+            self.selection_end_row = self.cursor_row
+            self.selection_end_col = self.cursor_col
+        widths = (
+            [self.column_widths.get(c, 12) for c in self.df.columns]
+            if self.df is not None
+            else []
+        )
+        self._ensure_cursor_visible(self._current_screen_width(), widths)
+        self._refresh_rows()
+
+    def next_page(self) -> None:
+        page_size = self._get_adaptive_page_size()
+        max_page = max(0, (self.total_filtered_rows - 1) // page_size)
+        if self.current_page < max_page:
+            self.current_page += 1
+            self.cursor_row = 0
+            self.selection_active = False
+            self._refresh_rows()
+
+    def prev_page(self) -> None:
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.cursor_row = 0
+            self.selection_active = False
+            self._refresh_rows()
+
+    # ------------------------------------------------------------------
+    # Filtering and sorting
+    # ------------------------------------------------------------------
+    def open_filter_dialog(self) -> None:
+        if self.df is None or self.loop is None:
+            return
+
+        def _on_submit(filters: dict[str, str]) -> None:
+            self.close_overlay()
+            self.apply_filters(filters)
+
+        def _on_cancel() -> None:
+            self.close_overlay()
+
+        dialog = FilterDialog(
+            list(self.df.columns), self.current_filters.copy(), _on_submit, _on_cancel
+        )
+        self.show_overlay(dialog)
 
     def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
-        """Apply filters from the filters dict."""
         if self.lazy_df is None or self.df is None:
             return
-
-        # Update current filters if provided
         if filters is not None:
-            # filters are keyed by sanitized column key
             self.current_filters = filters
-
-            # Build a mapping back to original column names
-            key_to_name = self._column_key_to_name()
-
-            # Build filter patterns dict with regex detection using original names
             self.filter_patterns = {}
-            filters_original: dict[str, str] = {}
-            for key, val in filters.items():
-                col = key_to_name.get(key)
-                if col is None:
+            for col, val in filters.items():
+                cleaned = val.strip()
+                if not cleaned:
                     continue
-                val_stripped = val.strip()
-                if val_stripped:
-                    if val_stripped.startswith("/"):
-                        # Regex mode: store pattern without leading /
-                        pattern = val_stripped[1:]
-                        if pattern:
-                            self.filter_patterns[col] = (pattern, True)
-                            filters_original[col] = val_stripped
-                    else:
-                        # Literal mode: store as-is
-                        self.filter_patterns[col] = (val_stripped, False)
-                        filters_original[col] = val_stripped
+                if cleaned.startswith("/") and len(cleaned) > 1:
+                    self.filter_patterns[col] = (cleaned[1:], True)
+                else:
+                    self.filter_patterns[col] = (cleaned, False)
 
-            # Debug: show what we're filtering (use original names)
-            active = {k: v for k, v in filters_original.items() if v.strip()}
-            if active:
-                self.notify(f"Filtering: {active}", timeout=2)
-
-        # Clear page cache when filters change
-        self._invalidate_page_cache()
-
-        # Apply filters using the standalone function
-        # Apply filters using the standalone function (with original names)
-        filters_for_lazy = {}
-        if self.current_filters:
-            key_to_name = self._column_key_to_name()
-            for key, val in self.current_filters.items():
-                col = key_to_name.get(key)
-                if col is not None:
-                    filters_for_lazy[col] = val
-
+        self._invalidate_cache()
         self.filtered_lazy = apply_filters_to_lazyframe(
-            self.lazy_df, self.df, filters_for_lazy
+            self.lazy_df, self.df, self.current_filters
         )
-
-        # Re-apply sort if a column is currently sorted
-        if self.sorted_column is not None:
+        if self.sorted_column:
             self.filtered_lazy = self.filtered_lazy.sort(
                 self.sorted_column, descending=self.sorted_descending, nulls_last=True
             )
 
-        # Update filtered lazy frame and reset to first page
         self.current_page = 0
+        self.cursor_row = 0
         self.total_filtered_rows = self.filtered_lazy.select(pl.len()).collect().item()
-        self.populate_table()
-        self.update_status()
+        self._refresh_rows()
 
-    def action_reset_filters(self) -> None:
-        """Reset all filters."""
+    def reset_filters(self) -> None:
         self.current_filters = {}
-        self.filter_patterns = {}  # Clear filter patterns to remove highlighting
-        self._invalidate_page_cache()  # Clear page cache
-        self.filtered_lazy = self.lazy_df
-        self.current_page = 0
+        self.filter_patterns = {}
         self.sorted_column = None
         self.sorted_descending = False
-        if self.lazy_df is not None:
-            self.total_filtered_rows = self.total_rows
-        self.populate_table()
-        self.update_status()
+        self.filtered_lazy = self.lazy_df
+        self._invalidate_cache()
+        self.current_page = 0
+        self.cursor_row = 0
+        self.total_filtered_rows = self.total_rows
+        self._refresh_rows()
+        self.notify("Filters cleared")
 
-    def action_show_filters(self) -> None:
-        """Show the filter modal."""
-        if self.df is None:
-            return
-
-        # Get the currently selected column (original name and sanitized key)
-        table = self.query_one("#data-table", DataTable)
-        selected_column_key = None
-        if table.cursor_column is not None and table.cursor_column < len(
-            self.df.columns
-        ):
-            selected_column = self.df.columns[table.cursor_column]
-            selected_column_key = self._get_column_key(selected_column)
-        else:
-            selected_column = None
-
-        def handle_filter_result(result: Optional[dict[str, str]]) -> None:
-            """Handle the result from the filter modal."""
-            if result is not None:
-                self.apply_filters(result)
-
-        columns_with_keys = [
-            (col, self._get_column_key(col)) for col in self.df.columns
-        ]
-
-        self.push_screen(
-            FilterModal(
-                columns_with_keys,
-                self.current_filters.copy(),
-                selected_column_key,
-            ),
-            handle_filter_result,
-        )
-
-    def action_next_page(self) -> None:
-        """Load next page of data."""
-        page_size = self._get_adaptive_page_size()
-        max_page = (self.total_filtered_rows - 1) // page_size
-        if self.current_page < max_page:
-            self.current_page += 1
-            self.populate_table()
-            self.update_status()
-
-    def action_prev_page(self) -> None:
-        """Load previous page of data."""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.populate_table()
-            self.update_status()
-
-    def action_move_left(self) -> None:
-        """Move cursor left and clear selection."""
-        table = self.query_one("#data-table", DataTable)
-        if self.selection_active:
-            self.selection_active = False
-            self.update_selection_styling()
-            self.update_status()
-        table.action_cursor_left()
-
-    def action_move_right(self) -> None:
-        """Move cursor right and clear selection."""
-        table = self.query_one("#data-table", DataTable)
-        if self.selection_active:
-            self.selection_active = False
-            self.update_selection_styling()
-            self.update_status()
-        table.action_cursor_right()
-
-    def action_move_up(self) -> None:
-        """Move cursor up and clear selection."""
-        table = self.query_one("#data-table", DataTable)
-        if self.selection_active:
-            self.selection_active = False
-            self.update_selection_styling()
-            self.update_status()
-        table.action_cursor_up()
-
-    def action_move_down(self) -> None:
-        """Move cursor down and clear selection."""
-        table = self.query_one("#data-table", DataTable)
-        if self.selection_active:
-            self.selection_active = False
-            self.update_selection_styling()
-            self.update_status()
-        table.action_cursor_down()
-
-    def action_select_left(self) -> None:
-        """Start/extend selection and move left."""
-        table = self.query_one("#data-table", DataTable)
-        if not self.selection_active:
-            # Start new selection
-            self.selection_active = True
-            self.selection_start_row = table.cursor_row
-            self.selection_start_col = table.cursor_column
-        table.action_cursor_left()
-        self.selection_end_row = table.cursor_row
-        self.selection_end_col = table.cursor_column
-        self.update_selection_styling()
-        self.update_status()
-
-    def action_select_right(self) -> None:
-        """Start/extend selection and move right."""
-        table = self.query_one("#data-table", DataTable)
-        if not self.selection_active:
-            # Start new selection
-            self.selection_active = True
-            self.selection_start_row = table.cursor_row
-            self.selection_start_col = table.cursor_column
-        table.action_cursor_right()
-        self.selection_end_row = table.cursor_row
-        self.selection_end_col = table.cursor_column
-        self.update_selection_styling()
-        self.update_status()
-
-    def action_select_up(self) -> None:
-        """Start/extend selection and move up."""
-        table = self.query_one("#data-table", DataTable)
-        if not self.selection_active:
-            # Start new selection
-            self.selection_active = True
-            self.selection_start_row = table.cursor_row
-            self.selection_start_col = table.cursor_column
-        table.action_cursor_up()
-        self.selection_end_row = table.cursor_row
-        self.selection_end_col = table.cursor_column
-        self.update_selection_styling()
-        self.update_status()
-
-    def action_select_down(self) -> None:
-        """Start/extend selection and move down."""
-        table = self.query_one("#data-table", DataTable)
-        if not self.selection_active:
-            # Start new selection
-            self.selection_active = True
-            self.selection_start_row = table.cursor_row
-            self.selection_start_col = table.cursor_column
-        table.action_cursor_down()
-        self.selection_end_row = table.cursor_row
-        self.selection_end_col = table.cursor_column
-        self.update_selection_styling()
-        self.update_status()
-
-    def action_copy_selection(self) -> None:
-        """Copy selected cells to clipboard."""
-        if self.cached_page_df is None:
-            return
-
-        import pyperclip
-
-        if not self.selection_active:
-            # Copy single cell
-            cell_str = get_single_cell_value(self)
-            pyperclip.copy(cell_str)
-            self.notify(
-                f"Copied {cell_str if cell_str else '(empty)'} to clipboard", timeout=2
-            )
-            self.update_status()
-            return
-
-        # Build CSV content from selection using Polars
-        from io import StringIO
-
-        # Create a subset DataFrame with just the selected range
-        selected_df = create_selected_dataframe(self)
-
-        # Use Polars to write properly escaped CSV
-        csv_buffer = StringIO()
-        selected_df.write_csv(csv_buffer, include_header=True)
-        csv_content = csv_buffer.getvalue()
-
-        # Copy to clipboard
-        pyperclip.copy(csv_content)
-
-        # Clear selection and notify
-        num_rows, num_cols = get_selection_dimensions(self)
-        clear_selection_and_update(self)
-        self.notify(
-            f"Copied {num_rows} rows, {num_cols} columns",
-            timeout=2,
-        )
-
-    def action_save_selection(self) -> None:
-        """Show filename input field to save selected cells."""
-        if self.cached_page_df is None:
-            return
-
-        # Show the filename input field and focus it
-        input_field = self.query_one("#filename-input", Input)
-        input_field.display = True
-        input_field.focus()
-        self.filename_input_active = True
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle filename input submission."""
-        if event.input.id != "filename-input" or not self.filename_input_active:
-            return
-
-        filename = event.value.strip()
-        if not filename:
-            self.notify("Please enter a filename", timeout=2)
-            return
-
-        if Path(filename).exists():
-            self.notify(f"File '{filename}' already exists")
-            return
-
-        # Hide the input field
-        event.input.display = False
-        event.input.value = ""
-        self.filename_input_active = False
-
-        # Save the file
-        self._save_to_file(filename)
-
-    def _save_to_file(self, file_path: str) -> None:
-        """Save selected cells to the specified CSV file."""
-        if self.cached_page_df is None:
-            self.notify("No data to save", timeout=2)
-            return
-        try:
-            if not self.selection_active:
-                selected_df = self.cached_page_df
-                num_rows = selected_df.height
-                num_cols = len(selected_df.columns)
-            else:
-                # Create a subset DataFrame with just the selected range
-                selected_df = create_selected_dataframe(self)
-                num_rows, num_cols = get_selection_dimensions(self)
-            # Save to file using Polars
-            selected_df.write_csv(file_path, include_header=True)
-            # Clear selection and notify
-            clear_selection_and_update(self)
-            self.notify(
-                f"Saved {num_rows} rows, {num_cols} columns to {Path(file_path).name}",
-                timeout=2,
-            )
-        except Exception as e:
-            self.notify(f"Error saving file: {e}", timeout=3)
-
-    def action_sort_column(self) -> None:
-        """Sort the current column."""
+    def sort_current_column(self) -> None:
         if self.df is None or self.filtered_lazy is None:
             return
+        if not self.df.columns:
+            return
+        col_name = self.df.columns[self.cursor_col]
+        if self.sorted_column == col_name:
+            self.sorted_descending = not self.sorted_descending
+        else:
+            self.sorted_column = col_name
+            self.sorted_descending = False
 
-        table = self.query_one("#data-table", DataTable)
-        col_idx = table.cursor_column
+        self.filtered_lazy = self.filtered_lazy.sort(
+            col_name, descending=self.sorted_descending, nulls_last=True
+        )
+        self._invalidate_cache()
+        self.current_page = 0
+        self.cursor_row = 0
+        self._refresh_rows()
+        direction = "descending" if self.sorted_descending else "ascending"
+        self.notify(f"Sorted by {col_name} ({direction})")
 
-        if col_idx is not None and col_idx < len(self.df.columns):
-            col_name = self.df.columns[col_idx]
+    # ------------------------------------------------------------------
+    # Selection, copy, save
+    # ------------------------------------------------------------------
+    def copy_selection(self) -> None:
+        if self.cached_page_df is None:
+            return
+        if not self.selection_active:
+            cell_str = get_single_cell_value(self)
+            pyperclip.copy(cell_str)
+            self.notify("Cell copied")
+            return
+        selected_df = create_selected_dataframe(self)
+        num_rows, num_cols = get_selection_dimensions(self)
+        from io import StringIO
 
-            # Toggle sort direction if sorting same column, otherwise start with ascending
-            if self.sorted_column == col_name:
-                self.sorted_descending = not self.sorted_descending
-            else:
-                self.sorted_column = col_name
-                self.sorted_descending = False
+        buffer = StringIO()
+        selected_df.write_csv(buffer, include_header=True)
+        pyperclip.copy(buffer.getvalue())
+        clear_selection_and_update(self)
+        self.notify(f"Copied {num_rows}x{num_cols}")
 
-            # Sort the filtered lazy frame with nulls last
-            self.filtered_lazy = self.filtered_lazy.sort(
-                col_name, descending=self.sorted_descending, nulls_last=True
-            )
-            # Invalidate page cache since sort order changed
-            self._invalidate_page_cache()
-            self.columns_need_refresh = True
-            # Reset to first page and refresh
-            self.current_page = 0
-            self.populate_table()
-            self.update_status()
-            self.notify(
-                f"Sorted by {col_name} {'descending ▼' if self.sorted_descending else 'ascending ▲'}",
-                timeout=2,
-            )
-
-    def update_status(self) -> None:
-        """Update the status bar."""
-        if self.lazy_df is None:
+    def save_selection_dialog(self) -> None:
+        if self.cached_page_df is None or self.loop is None:
             return
 
-        # Use cached total rows to avoid recomputing length on every refresh
-        total_rows = self.total_rows
-        total_cols = len(self.lazy_df.columns)
+        def _on_submit(filename: str) -> None:
+            if not filename:
+                self.notify("Filename required")
+                return
+            self.close_overlay()
+            self._save_to_file(filename)
 
+        def _on_cancel() -> None:
+            self.close_overlay()
+
+        dialog = FilenameDialog("Save as", _on_submit, _on_cancel)
+        self.show_overlay(dialog)
+
+    def _save_to_file(self, file_path: str) -> None:
+        if self.cached_page_df is None:
+            self.notify("No data to save")
+            return
+        target = Path(file_path)
+        if target.exists():
+            self.notify(f"File {target} exists")
+            return
+        try:
+            if self.selection_active:
+                df_to_save = create_selected_dataframe(self)
+                num_rows, num_cols = get_selection_dimensions(self)
+            else:
+                df_to_save = self.cached_page_df
+                num_rows = df_to_save.height
+                num_cols = len(df_to_save.columns)
+            df_to_save.write_csv(target, include_header=True)
+            clear_selection_and_update(self)
+            self.notify(f"Saved {num_rows}x{num_cols} to {target.name}")
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Error saving file: {exc}")
+
+    # ------------------------------------------------------------------
+    # Overlay helpers
+    # ------------------------------------------------------------------
+    def show_overlay(self, widget: urwid.Widget) -> None:
+        if self.loop is None:
+            return
+        overlay = urwid.Overlay(
+            widget,
+            self.loop.widget,
+            align="center",
+            width=("relative", 80),
+            valign="middle",
+            height=("relative", 80),
+        )
+        self.loop.widget = overlay
+        self.overlaying = True
+
+    def close_overlay(self) -> None:
+        if self.loop is None:
+            return
+        if isinstance(self.loop.widget, urwid.Overlay):
+            self.loop.widget = self.loop.widget.bottom_w
+        self.overlaying = False
+        self._refresh_rows()
+
+    # ------------------------------------------------------------------
+    # Status handling
+    # ------------------------------------------------------------------
+    def notify(self, message: str, duration: float = 2.0) -> None:
+        self.status_widget.set_text(message)
+        if self.loop:
+            self.loop.set_alarm_in(duration, lambda *_: self._update_status())
+
+    def _update_status(self, *_args) -> None:  # noqa: ANN002, D401
+        if self.lazy_df is None:
+            return
         page_size = self._get_adaptive_page_size()
-        start_row = self.current_page * page_size + 1
-        end_row = min((self.current_page + 1) * page_size, self.total_filtered_rows)
+        start = self.current_page * page_size + 1
+        end = min((self.current_page + 1) * page_size, self.total_filtered_rows)
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-
-        status = self.query_one("#status", Static)
-
-        # Build status message
         selection_text = ""
         if self.selection_active:
-            row_start = min(self.selection_start_row, self.selection_end_row)
-            row_end = max(self.selection_start_row, self.selection_end_row)
-            col_start = min(self.selection_start_col, self.selection_end_col)
-            col_end = max(self.selection_start_col, self.selection_end_col)
-            num_rows = row_end - row_start + 1
-            num_cols = col_end - col_start + 1
-            selection_text = f"-- SELECT ({num_rows}x{num_cols}) -- | "
+            rows, cols = get_selection_dimensions(self)
+            selection_text = f"SELECT {rows}x{cols} | "
+        status = (
+            f"{selection_text}Page {self.current_page + 1}/{max_page + 1} "
+            f"({start:,}-{end:,} of {self.total_filtered_rows:,}) | "
+            f"Columns: {len(self.column_names) if self.column_names else '…'}"
+        )
+        self.status_widget.set_text(status)
 
-        # Add preloading indicator
-        preload_text = "📄 Preloading... | " if self.is_preloading else ""
+    # ------------------------------------------------------------------
+    # Main entry
+    # ------------------------------------------------------------------
+    def run(self) -> None:
+        self.load_csv()
+        root = self.build_ui()
+        self.loop = urwid.MainLoop(
+            root,
+            palette=[
+                ("header", "black", "light gray"),
+                ("status", "light gray", "dark gray"),
+                ("cell_selected", "black", "yellow"),
+                ("filter", "light red", "default"),
+                ("focus", "black", "light cyan"),
+            ],
+            unhandled_input=self.handle_input,
+        )
+        self._refresh_rows()
 
-        if self.total_filtered_rows < total_rows:
-            status.update(
-                f"{preload_text}{selection_text}{self.total_filtered_rows:,} matches | "
-                f"Page {self.current_page + 1}/{max_page + 1} "
-                f"({start_row:,}-{end_row:,} of {self.total_filtered_rows:,} records) | "
-                f"{total_cols} columns"
-            )
-        else:
-            status.update(
-                f"{preload_text}{selection_text}Page {self.current_page + 1}/{max_page + 1} "
-                f"({start_row:,}-{end_row:,} of {total_rows:,} records) | "
-                f"{total_cols} columns"
-            )
+        try:
+            self.loop.run()
+        finally:
+            # Ensure terminal modes are restored even on errors/interrupts
+            try:
+                self.loop.screen.clear()
+                self.loop.screen.reset_default_terminal_colors()
+            except Exception:
+                pass
+
+
+def main() -> None:
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: csvpeek <path_to_csv>")
+        raise SystemExit(1)
+
+    csv_path = sys.argv[1]
+    if not Path(csv_path).exists():
+        print(f"Error: File '{csv_path}' not found.")
+        raise SystemExit(1)
+
+    app = CSVViewerApp(csv_path)
+    app.run()
 
 
 if __name__ == "__main__":
-    from csvpeek.main import main
-
     main()

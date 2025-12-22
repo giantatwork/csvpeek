@@ -15,15 +15,12 @@ markdown-it-py==4.0.0
     # via
     #   mdit-py-plugins
     #   rich
-    #   textual
 mdit-py-plugins==0.5.0
-    # via textual
 mdurl==0.1.2
     # via markdown-it-py
 packaging==25.0
     # via pytest
 platformdirs==4.5.1
-    # via textual
 pluggy==1.6.0
     # via
     #   pytest
@@ -36,15 +33,12 @@ pygments==2.19.2
     # via
     #   pytest
     #   rich
-    #   textual
 pyperclip==1.11.0
     # via csvpeek
 pytest==9.0.2
     # via pytest-cov
 pytest-cov==7.0.0
 rich==14.2.0
-    # via textual
-textual==6.7.1
     # via csvpeek
 tomli==2.3.0 ; python_full_version <= '3.11'
     # via
@@ -53,6 +47,5 @@ tomli==2.3.0 ; python_full_version <= '3.11'
 typing-extensions==4.15.0
     # via
     #   exceptiongroup
-    #   textual
 uc-micro-py==1.0.3
     # via linkify-it-py
