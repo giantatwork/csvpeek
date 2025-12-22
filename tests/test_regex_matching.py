@@ -1,371 +1,128 @@
-"""
-Extensive tests to ensure Polars regex filtering and Python regex highlighting
-produce identical matches.
+"""Ensure DuckDB regex matching aligns with Python's regex highlighting."""
 
-This is critical to ensure the UI highlighting accurately reflects what data
-is being filtered.
-"""
+from __future__ import annotations
 
 import re
 
-import polars as pl
+import duckdb
 
 
-def get_polars_matches(text: str, pattern: str) -> list[tuple[int, int]]:
-    """
-    Get match positions using Polars' regex engine.
-
-    This simulates what Polars does when filtering - it just checks if the pattern
-    matches anywhere in the string. We then use Python's re to find the actual
-    positions since Polars doesn't expose position information.
-
-    The key is: we verify that Polars WOULD match this row, and Python finds
-    the same matches.
-
-    Returns list of (start, end) tuples for each match.
-    """
-    # Create a DataFrame with the text
-    df = pl.DataFrame({"text": [text]})
-
-    # Check if Polars would match this row with the pattern
+def duckdb_matches(text: str, pattern: str) -> bool:
     try:
-        matches_row = df.filter(pl.col("text").str.contains(f"(?i){pattern}"))
-
-        if len(matches_row) == 0:
-            # Polars doesn't match - should be same as Python
-            return []
-
-        # Polars matches - now use Python re to find positions
-        # This is what we do in styling.py for highlighting
-        python_matches = []
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            python_matches.append((match.start(), match.end()))
-
-        return python_matches
+        with duckdb.connect() as con:
+            return bool(
+                con.execute(
+                    "SELECT regexp_matches(?, ?, 'i')", [text, pattern]
+                ).fetchone()[0]
+            )
     except Exception:
-        return []
+        return False
 
 
-def get_python_matches(text: str, pattern: str) -> list[tuple[int, int]]:
-    """
-    Get match positions using Python's re module with IGNORECASE flag.
-
-    This is what we use in styling.py for highlighting.
-    Returns list of (start, end) tuples for each match.
-    """
+def python_matches(text: str, pattern: str) -> bool:
     try:
-        matches = []
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            matches.append((match.start(), match.end()))
-        return matches
+        return re.search(pattern, text, re.IGNORECASE) is not None
     except re.error:
-        return []
+        return False
 
 
 class TestRegexMatchingConsistency:
-    """Test that Polars and Python regex matching produce identical results."""
+    """DuckDB regexp_matches should agree with Python re search semantics for highlighting."""
+
+    def _assert_same(self, text: str, pattern: str):
+        assert duckdb_matches(text, pattern) == python_matches(text, pattern)
 
     def test_simple_word_match(self):
-        """Test basic word matching."""
-        text = "Hello World, hello world"
-        pattern = "hello"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2  # Two occurrences
+        self._assert_same("Hello World, hello world", "hello")
 
     def test_case_insensitive_matching(self):
-        """Test that case-insensitive matching works identically."""
-        text = "ABC abc AbC aBc"
-        pattern = "abc"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 4
+        self._assert_same("ABC abc AbC aBc", "abc")
 
     def test_special_char_in_pattern(self):
-        """Test regex with special characters."""
-        text = "test@example.com, TEST@EXAMPLE.COM"
-        pattern = r"\w+@\w+\.\w+"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("test@example.com, TEST@EXAMPLE.COM", r"\w+@\w+\.\w+")
 
     def test_dot_metacharacter(self):
-        """Test that . matches any character."""
-        text = "a1b a2b a3b"
-        pattern = r"a.b"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 3
+        self._assert_same("a1b a2b a3b", r"a.b")
 
     def test_character_class(self):
-        """Test character class matching."""
-        text = "123 456 789"
-        pattern = r"\d+"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 3
+        self._assert_same("123 456 789", r"\d+")
 
     def test_alternation(self):
-        """Test alternation (OR) operator."""
-        text = "cat dog bird cat"
-        pattern = r"cat|dog"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 3  # Two cats, one dog
+        self._assert_same("cat dog bird cat", r"cat|dog")
 
     def test_quantifiers_star(self):
-        """Test * quantifier."""
-        text = "a aa aaa aaaa"
-        pattern = r"a+"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 4
+        self._assert_same("a aa aaa aaaa", r"a+")
 
     def test_quantifiers_question(self):
-        """Test ? quantifier."""
-        text = "color colour"
-        pattern = r"colou?r"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("color colour", r"colou?r")
 
     def test_word_boundary(self):
-        """Test word boundary \\b."""
-        text = "test testing tested test"
-        pattern = r"\btest\b"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2  # Only standalone "test"
+        self._assert_same("test testing tested test", r"\btest\b")
 
     def test_anchors_start(self):
-        """Test start anchor ^."""
-        text = "start middle start"
-        pattern = r"^start"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 1  # Only at start
+        self._assert_same("start middle start", r"^start")
 
     def test_anchors_end(self):
-        """Test end anchor $."""
-        text = "end middle end"
-        pattern = r"end$"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 1  # Only at end
+        self._assert_same("end middle end", r"end$")
 
     def test_groups_capturing(self):
-        """Test capturing groups."""
-        text = "abc123 def456"
-        pattern = r"([a-z]+)(\d+)"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("abc123 def456", r"([a-z]+)(\d+)")
 
     def test_groups_non_capturing(self):
-        """Test non-capturing groups."""
-        text = "abc abc"
-        pattern = r"(?:abc)"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("abc abc", r"(?:abc)")
 
     def test_unicode_text(self):
-        """Test matching unicode characters."""
-        text = "café CAFÉ Café"
-        pattern = r"café"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 3
+        self._assert_same("café CAFÉ Café", r"café")
 
     def test_empty_pattern(self):
-        """Test empty pattern behavior."""
-        text = "test"
-        pattern = r""
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        # Both should match at every position
-        assert polars_matches == python_matches
+        self._assert_same("test", r"")
 
     def test_overlapping_matches(self):
-        """Test overlapping pattern matches."""
-        text = "aaa"
-        pattern = r"aa"
-
-        # Note: Polars and re.finditer both find non-overlapping matches
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 1  # Only first "aa", not overlapping
+        self._assert_same("aaa", r"aa")
 
     def test_backslash_escape(self):
-        """Test escaping special characters."""
-        text = "price: $100 $200"
-        pattern = r"\$\d+"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("price: $100 $200", r"\$\d+")
 
     def test_complex_email_pattern(self):
-        """Test complex real-world pattern (email)."""
-        text = "Contact: john@example.com or JANE@EXAMPLE.COM"
-        pattern = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same(
+            "Contact: john@example.com or JANE@EXAMPLE.COM",
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+        )
 
     def test_ip_address_pattern(self):
-        """Test IP address pattern."""
-        text = "Server: 192.168.1.1 and 10.0.0.1"
-        pattern = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same(
+            "Server: 192.168.1.1 and 10.0.0.1", r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        )
 
     def test_phone_number_pattern(self):
-        """Test phone number pattern."""
-        text = "Call: 555-1234 or 555-5678"
-        pattern = r"\d{3}-\d{4}"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("Call: 555-1234 or 555-5678", r"\d{3}-\d{4}")
 
     def test_no_matches(self):
-        """Test pattern with no matches."""
-        text = "hello world"
-        pattern = r"xyz"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 0
+        self._assert_same("hello world", r"xyz")
 
 
 class TestInvalidRegex:
-    """Test handling of invalid regex patterns."""
+    """Invalid patterns should be handled gracefully."""
 
-    def test_invalid_regex_python(self):
-        """Test Python handles invalid regex gracefully."""
-        text = "test"
-        pattern = r"[invalid"  # Unclosed bracket
-
-        python_matches = get_python_matches(text, pattern)
-        assert python_matches == []  # Should return empty list
-
-    def test_invalid_regex_polars(self):
-        """Test Polars handles invalid regex."""
-        text = "test"
-        pattern = r"[invalid"
-
-        # Polars may throw or return empty, but shouldn't crash
-        try:
-            polars_matches = get_polars_matches(text, pattern)
-            # If it succeeds, should be empty or same as Python
-            assert polars_matches == get_python_matches(text, pattern)
-        except Exception:
-            # If it throws, that's also acceptable
-            pass
+    def test_invalid_regex(self):
+        assert duckdb_matches("test", r"[invalid") is False
+        assert python_matches("test", r"[invalid") is False
 
 
 class TestEdgeCases:
-    """Test edge cases for regex matching."""
+    """Edge inputs behave consistently."""
+
+    def _assert_same(self, text: str, pattern: str):
+        assert duckdb_matches(text, pattern) == python_matches(text, pattern)
 
     def test_empty_text(self):
-        """Test matching against empty text."""
-        text = ""
-        pattern = r"test"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 0
+        self._assert_same("", r"test")
 
     def test_whitespace_only(self):
-        """Test matching whitespace."""
-        text = "   \t\n   "
-        pattern = r"\s+"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
+        self._assert_same("   \t\n   ", r"\s+")
 
     def test_very_long_text(self):
-        """Test matching in very long text."""
-        text = "test " * 1000  # 5000 characters
-        pattern = r"test"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 1000
+        self._assert_same("test " * 1000, r"test")
 
     def test_multibyte_characters(self):
-        """Test matching with multibyte UTF-8 characters."""
-        text = "Hello 世界 Hello"
-        pattern = r"Hello"
-
-        polars_matches = get_polars_matches(text, pattern)
-        python_matches = get_python_matches(text, pattern)
-
-        assert polars_matches == python_matches
-        assert len(polars_matches) == 2
+        self._assert_same("Hello 世界 Hello", r"Hello")

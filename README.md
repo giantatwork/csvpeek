@@ -5,11 +5,11 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 
-**Csvpeek** is a snappy, memory-efficient CSV viewer built for speed. Powered by [Polars](https://pola.rs/) for lightning-fast data operations and [Urwid](https://urwid.org/) for a lean terminal UI.
+**Csvpeek** is a snappy, memory-efficient CSV viewer built for speed. Powered by [DuckDB](https://duckdb.org/) for fast SQL-backed querying and [Urwid](https://urwid.org/) for a lean terminal UI.
 
 ## ✨ Features
 
-- **Fast** - Lazy loading with Polars means instant startup, even with huge files
+- **Fast** - DuckDB streaming with LIMIT/OFFSET keeps startup instant, even with huge files
 - **Smart Filtering** - Real-time column filtering with literal text search and numeric ranges
 - **Modern TUI** - Beautiful terminal interface with syntax highlighting
 - **Large File Support** - Pagination handles millions of rows without breaking a sweat
@@ -101,7 +101,7 @@ csvpeek/
 
 ### Key Design Decisions
 
-- **Lazy Loading**: Polars' lazy evaluation means queries are optimized and only necessary data is loaded
+- **Lazy Loading**: DuckDB queries with LIMIT/OFFSET keep memory bounded and avoid up-front scans
 - **Pagination**: Only 100 rows in memory at once - handles GB-sized files effortlessly
 - **Incremental Updates**: Cell selection updates only changed cells, not the entire table
 - **Modular Design**: Separated concerns make the codebase easy to extend
@@ -109,7 +109,7 @@ csvpeek/
 ## 🔧 Requirements
 
 - Python 3.10+
-- Polars >= 0.19.0
+- DuckDB >= 1.1.0
 - Urwid >= 2.1.0
 - Pyperclip >= 1.9.0
 
@@ -147,7 +147,7 @@ MIT License - see LICENSE file for details
 ## 🙏 Acknowledgments
 
 Built with amazing open-source tools:
-- [Polars](https://pola.rs/) - Lightning-fast DataFrames
+- [DuckDB](https://duckdb.org/) - Embedded analytics database
 - [Urwid](https://urwid.org/) - Lightweight terminal UI toolkit
 
 ## 📬 Contact
@@ -194,17 +194,14 @@ python csvpeek.py data.csv
 ## Requirements
 
 - Python 3.10+
-- polars >= 0.19.0
+- duckdb >= 1.1.0
 - urwid >= 2.1.0
 - pyperclip >= 1.8.0
 
 
 ## Memory Efficiency
 
-The viewer uses Polars, which is written in Rust and optimized for:
-- Zero-copy operations where possible
-- Efficient memory layout (columnar format)
-- Lazy evaluation for complex queries
-- SIMD vectorization
-
-This makes it significantly more memory-efficient than pandas for large datasets.
+The viewer uses DuckDB, which runs embedded and optimizes for:
+- Vectorized execution with columnar storage
+- SQL filtering, sorting, and regex matching directly in the engine
+- Streaming via LIMIT/OFFSET to keep memory stable on large files

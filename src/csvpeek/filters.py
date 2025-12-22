@@ -1,68 +1,52 @@
-"""Filter utilities for CSV data."""
+"""Filter utilities for CSV data (DuckDB backend)."""
+
+from __future__ import annotations
 
 import re
+from typing import Iterable
 
-import polars as pl
+
+def _quote_ident(name: str) -> str:
+    return f'"{name.replace('"', '""')}"'
 
 
-def apply_filters_to_lazyframe(
-    lazy_df: pl.LazyFrame, df_sample: pl.DataFrame, filters: dict[str, str]
-) -> pl.LazyFrame:
+def build_where_clause(
+    filters: dict[str, str], valid_columns: Iterable[str]
+) -> tuple[str, list]:
+    """Build a DuckDB WHERE clause and parameters from filter definitions.
+
+    Literal filters use a case-insensitive substring match; filters prefixed with
+    '/' are treated as case-insensitive regex via regexp_matches.
     """
-    Apply filters to a LazyFrame.
 
-    Filters starting with '/' are treated as case-insensitive regex patterns.
-    Other filters are treated as literal substring searches.
+    clauses = []
+    params: list = []
+    valid = set(valid_columns)
 
-    Args:
-        lazy_df: The lazy frame to filter
-        df_sample: A sample DataFrame with schema information
-        filters: Dictionary mapping column names to filter values
-
-    Returns:
-        Filtered LazyFrame
-    """
-    filtered = lazy_df
-
-    # Apply each column filter
-    for col, filter_value in filters.items():
-        filter_value = filter_value.strip()
-
-        if not filter_value:
+    for col, raw in filters.items():
+        if col not in valid:
+            continue
+        val = raw.strip()
+        if not val:
             continue
 
-        try:
-            # Check if column exists
-            if col not in df_sample.columns:
+        ident = _quote_ident(col)
+
+        if val.startswith("/"):
+            pattern = val[1:]
+            if not pattern:
                 continue
+            try:
+                re.compile(pattern)
+            except re.error:
+                continue
+            clauses.append(f"regexp_matches({ident}, ?, 'i')")
+            params.append(pattern)
+        else:
+            clauses.append(f"lower({ident}) LIKE ?")
+            params.append(f"%{val.lower()}%")
 
-            # Detect regex mode (starts with /)
-            if filter_value.startswith("/"):
-                # Regex mode: remove leading / and use as pattern
-                pattern = filter_value[1:]
-                if not pattern:  # Empty pattern after /
-                    continue
+    if not clauses:
+        return "", []
 
-                # Validate regex pattern
-                try:
-                    re.compile(pattern, re.IGNORECASE)
-                except re.error:
-                    # Invalid regex, skip this filter
-                    continue
-
-                # Use Polars regex with case-insensitive flag
-                # Note: (?i) makes the pattern case-insensitive
-                filtered = filtered.filter(pl.col(col).str.contains(f"(?i){pattern}"))
-            else:
-                # Literal mode: case-insensitive substring search using literal contains
-                lower_filter = filter_value.lower()
-                filtered = filtered.filter(
-                    pl.col(col)
-                    .str.to_lowercase()
-                    .str.contains(lower_filter, literal=True)
-                )
-        except Exception:
-            # If filter fails, skip this column
-            pass
-
-    return filtered
+    return " WHERE " + " AND ".join(clauses), params

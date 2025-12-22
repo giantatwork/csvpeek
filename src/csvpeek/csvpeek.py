@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-csvpeek - A snappy, memory-efficient CSV viewer using Polars and Urwid.
+csvpeek - A snappy, memory-efficient CSV viewer using DuckDB and Urwid.
 """
 
 from __future__ import annotations
 
+import csv
+import gc
 import re
 from pathlib import Path
 from typing import Callable, Optional
 
-import polars as pl
+import duckdb
 import pyperclip
 import urwid
 
-from csvpeek.filters import apply_filters_to_lazyframe
+from csvpeek.filters import build_where_clause
 from csvpeek.selection_utils import (
     clear_selection_and_update,
     create_selected_dataframe,
@@ -132,19 +134,19 @@ class CSVViewerApp:
 
     def __init__(self, csv_path: str) -> None:
         self.csv_path = Path(csv_path)
-        self.df: Optional[pl.DataFrame] = None
-        self.lazy_df: Optional[pl.LazyFrame] = None
-        self.filtered_lazy: Optional[pl.LazyFrame] = None
-        self.cached_page_df: Optional[pl.DataFrame] = None
+        self.con: Optional[duckdb.DuckDBPyConnection] = None
+        self.table_name = "data"
+        self.cached_rows: list[tuple] = []
         self.column_names: list[str] = []
 
         self.current_page = 0
         self.total_rows = 0
         self.total_filtered_rows = 0
-        self.page_cache: dict[int, pl.DataFrame] = {}
 
         self.current_filters: dict[str, str] = {}
         self.filter_patterns: dict[str, tuple[str, bool]] = {}
+        self.filter_where: str = ""
+        self.filter_params: list = []
         self.sorted_column: Optional[str] = None
         self.sorted_descending = False
         self.column_widths: dict[str, int] = {}
@@ -172,40 +174,68 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     def load_csv(self) -> None:
         try:
-            self.lazy_df = pl.scan_csv(
-                self.csv_path, schema_overrides={}, infer_schema_length=0
-            )
-            # Cache column names without triggering repeated schema resolution
-            self.column_names = self.lazy_df.collect_schema().names()
-            self.df = self.lazy_df.head(1).collect()
-            self.filtered_lazy = self.lazy_df
-            self.total_rows = self.lazy_df.select(pl.len()).collect().item()
+            self.con = duckdb.connect(database=":memory:")
+            if str(self.csv_path) == "__demo__":
+                size = 50_000
+                self.con.execute(
+                    f"""
+                    CREATE TABLE {self.table_name} AS
+                    SELECT
+                        CAST(i AS VARCHAR) AS id,
+                        CAST(i % 10 AS VARCHAR) AS "group",
+                        CAST(i % 5 AS VARCHAR) AS category,
+                        CAST(i * 11 AS VARCHAR) AS value,
+                        'row ' || CAST(i AS VARCHAR) AS text
+                    FROM range(?) t(i)
+                    """,
+                    [size],
+                )
+            else:
+                self.con.execute(
+                    f"""
+                    CREATE TABLE {self.table_name} AS
+                    SELECT * FROM read_csv_auto(?, ALL_VARCHAR=TRUE)
+                    """,
+                    [str(self.csv_path)],
+                )
+
+            info = self.con.execute(
+                f"PRAGMA table_info('{self.table_name}')"
+            ).fetchall()
+            self.column_names = [row[1] for row in info]
+            self.total_rows = self.con.execute(
+                f"SELECT count(*) FROM {self.table_name}"
+            ).fetchone()[0]
             self.total_filtered_rows = self.total_rows
             self._calculate_column_widths()
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
 
     def _calculate_column_widths(self) -> None:
-        if self.lazy_df is None or self.df is None:
+        if not self.con or not self.column_names:
             return
         sample_size = min(1000, self.total_filtered_rows)
-        sample_df = self.lazy_df.head(sample_size).collect()
-
+        rows = self.con.execute(
+            f"SELECT * FROM {self.table_name} LIMIT {sample_size}"
+        ).fetchall()
         self.column_widths = {}
-        for col in self.df.columns:
+        for idx, col in enumerate(self.column_names):
             header_len = len(col) + 2
-            if col in sample_df.columns:
-                max_len = sample_df[col].str.len_chars().max() or 0
-            else:
-                max_len = 0
-            width = max(header_len, max_len)
-            width = max(8, min(int(width), 40))
+            max_len = header_len
+            for row in rows:
+                val = row[idx]
+                if val is None:
+                    continue
+                max_len = max(max_len, len(str(val)))
+            width = max(8, min(int(max_len), 40))
             self.column_widths[col] = width
 
+    def _quote_ident(self, name: str) -> str:
+        escaped = name.replace('"', '""')
+        return f'"{escaped}"'
+
     def _get_adaptive_page_size(self) -> int:
-        if self.df is None:
-            return self.PAGE_SIZE
-        num_cols = len(self.df.columns)
+        num_cols = len(self.column_names)
         if num_cols > 20:
             return max(20, self.PAGE_SIZE // 2)
         if num_cols > 10:
@@ -230,7 +260,7 @@ class CSVViewerApp:
         return urwid.Frame(body=body, header=header, footer=footer)
 
     def _build_header_row(self, max_width: Optional[int] = None) -> urwid.Columns:
-        if self.df is None:
+        if not self.column_names:
             return urwid.Columns([])
         if max_width is None:
             max_width = self._current_screen_width()
@@ -250,9 +280,9 @@ class CSVViewerApp:
         return 80
 
     def _visible_column_names(self, max_width: int) -> list[str]:
-        if self.df is None:
+        if not self.column_names:
             return []
-        names = list(self.df.columns)
+        names = list(self.column_names)
         widths = [self.column_widths.get(c, 12) for c in names]
         divide = 1
         start = min(self.col_offset, len(names) - 1 if names else 0)
@@ -299,36 +329,45 @@ class CSVViewerApp:
     # Rendering
     # ------------------------------------------------------------------
     def _invalidate_cache(self) -> None:
-        self.page_cache.clear()
+        # No caching beyond current page
+        return None
 
-    def _get_page_df(self) -> Optional[pl.DataFrame]:
-        if self.filtered_lazy is None:
-            return None
+    def _build_base_query(self) -> tuple[str, list]:
+        where, params = self.filter_where, list(self.filter_params)
+        order = ""
+        if self.sorted_column:
+            direction = "DESC" if self.sorted_descending else "ASC"
+            order = f" ORDER BY {self._quote_ident(self.sorted_column)} {direction}"
+        return where + order, params
+
+    def _get_page_rows(self) -> list[tuple]:
+        if not self.con:
+            return []
         page_size = self._get_adaptive_page_size()
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
         self.current_page = min(self.current_page, max_page)
-        if self.current_page in self.page_cache:
-            return self.page_cache[self.current_page]
         offset = self.current_page * page_size
-        page_df = self.filtered_lazy.slice(offset, page_size).collect().fill_null("")
-        self.page_cache[self.current_page] = page_df
-        return page_df
+        order_where, params = self._build_base_query()
+        query = f"SELECT * FROM {self.table_name}{order_where} LIMIT ? OFFSET ?"
+        return self.con.execute(query, params + [page_size, offset]).fetchall()
 
     def _refresh_rows(self) -> None:
-        page_df = self._get_page_df()
-        if page_df is None or self.df is None:
+        if not self.con:
             return
+        if not self.selection_active:
+            self.cached_rows = []
+        self.cached_rows = self._get_page_rows()
+        gc.collect()
         max_width = self._current_screen_width()
-        self.cached_page_df = page_df
         self.table_walker.clear()
         # Clamp cursor within available data
-        self.cursor_row = min(self.cursor_row, max(0, page_df.height - 1))
-        self.cursor_col = min(self.cursor_col, max(0, len(self.df.columns) - 1))
+        self.cursor_row = min(self.cursor_row, max(0, len(self.cached_rows) - 1))
+        self.cursor_col = min(self.cursor_col, max(0, len(self.column_names) - 1))
 
         visible_cols = self._visible_column_names(max_width)
-        vis_indices = [self.df.columns.index(c) for c in visible_cols]
+        vis_indices = [self.column_names.index(c) for c in visible_cols]
 
-        for row_idx, row in enumerate(page_df.iter_rows()):
+        for row_idx, row in enumerate(self.cached_rows):
             row_widget = self._build_row_widget(row_idx, row, vis_indices)
             self.table_walker.append(row_widget)
 
@@ -349,11 +388,11 @@ class CSVViewerApp:
     def _build_row_widget(
         self, row_idx: int, row: tuple, vis_indices: list[int]
     ) -> urwid.Widget:
-        if self.df is None:
+        if not self.column_names:
             return urwid.Text("")
         cells = []
         for col_idx in vis_indices:
-            col_name = self.df.columns[col_idx]
+            col_name = self.column_names[col_idx]
             width = self.column_widths.get(col_name, 12)
             cell = row[col_idx]
             is_selected = self._cell_selected(row_idx, col_idx)
@@ -466,8 +505,8 @@ class CSVViewerApp:
             self.selection_start_row = self.cursor_row
             self.selection_start_col = self.cursor_col
 
-        cols = len(self.df.columns) if self.df is not None else 0
-        rows = self.cached_page_df.height if self.cached_page_df is not None else 0
+        cols = len(self.column_names)
+        rows = len(self.cached_rows)
 
         if key.endswith("left"):
             self.cursor_col = max(0, self.cursor_col - 1)
@@ -483,11 +522,7 @@ class CSVViewerApp:
         else:
             self.selection_end_row = self.cursor_row
             self.selection_end_col = self.cursor_col
-        widths = (
-            [self.column_widths.get(c, 12) for c in self.df.columns]
-            if self.df is not None
-            else []
-        )
+        widths = [self.column_widths.get(c, 12) for c in self.column_names]
         self._ensure_cursor_visible(self._current_screen_width(), widths)
         self._refresh_rows()
 
@@ -511,7 +546,7 @@ class CSVViewerApp:
     # Filtering and sorting
     # ------------------------------------------------------------------
     def open_filter_dialog(self) -> None:
-        if self.df is None or self.loop is None:
+        if not self.column_names or self.loop is None:
             return
 
         def _on_submit(filters: dict[str, str]) -> None:
@@ -522,12 +557,12 @@ class CSVViewerApp:
             self.close_overlay()
 
         dialog = FilterDialog(
-            list(self.df.columns), self.current_filters.copy(), _on_submit, _on_cancel
+            list(self.column_names), self.current_filters.copy(), _on_submit, _on_cancel
         )
         self.show_overlay(dialog)
 
     def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
-        if self.lazy_df is None or self.df is None:
+        if not self.con:
             return
         if filters is not None:
             self.current_filters = filters
@@ -541,18 +576,13 @@ class CSVViewerApp:
                 else:
                     self.filter_patterns[col] = (cleaned, False)
 
-        self._invalidate_cache()
-        self.filtered_lazy = apply_filters_to_lazyframe(
-            self.lazy_df, self.df, self.current_filters
-        )
-        if self.sorted_column:
-            self.filtered_lazy = self.filtered_lazy.sort(
-                self.sorted_column, descending=self.sorted_descending, nulls_last=True
-            )
-
+        where, params = build_where_clause(self.current_filters, self.column_names)
+        self.filter_where = where
+        self.filter_params = params
+        count_query = f"SELECT count(*) FROM {self.table_name}{where}"
+        self.total_filtered_rows = self.con.execute(count_query, params).fetchone()[0]
         self.current_page = 0
         self.cursor_row = 0
-        self.total_filtered_rows = self.filtered_lazy.select(pl.len()).collect().item()
         self._refresh_rows()
 
     def reset_filters(self) -> None:
@@ -560,7 +590,8 @@ class CSVViewerApp:
         self.filter_patterns = {}
         self.sorted_column = None
         self.sorted_descending = False
-        self.filtered_lazy = self.lazy_df
+        self.filter_where = ""
+        self.filter_params = []
         self._invalidate_cache()
         self.current_page = 0
         self.cursor_row = 0
@@ -569,20 +600,16 @@ class CSVViewerApp:
         self.notify("Filters cleared")
 
     def sort_current_column(self) -> None:
-        if self.df is None or self.filtered_lazy is None:
+        if not self.column_names or not self.con:
             return
-        if not self.df.columns:
+        if not self.column_names:
             return
-        col_name = self.df.columns[self.cursor_col]
+        col_name = self.column_names[self.cursor_col]
         if self.sorted_column == col_name:
             self.sorted_descending = not self.sorted_descending
         else:
             self.sorted_column = col_name
             self.sorted_descending = False
-
-        self.filtered_lazy = self.filtered_lazy.sort(
-            col_name, descending=self.sorted_descending, nulls_last=True
-        )
         self._invalidate_cache()
         self.current_page = 0
         self.cursor_row = 0
@@ -594,25 +621,31 @@ class CSVViewerApp:
     # Selection, copy, save
     # ------------------------------------------------------------------
     def copy_selection(self) -> None:
-        if self.cached_page_df is None:
+        if not self.cached_rows:
             return
         if not self.selection_active:
             cell_str = get_single_cell_value(self)
             pyperclip.copy(cell_str)
             self.notify("Cell copied")
             return
-        selected_df = create_selected_dataframe(self)
+        selected_rows = create_selected_dataframe(self)
         num_rows, num_cols = get_selection_dimensions(self)
+        _row_start, _row_end, col_start, col_end = get_selection_dimensions(
+            self, as_bounds=True
+        )
+        headers = self.column_names[col_start : col_end + 1]
         from io import StringIO
 
         buffer = StringIO()
-        selected_df.write_csv(buffer, include_header=True)
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        writer.writerows(selected_rows)
         pyperclip.copy(buffer.getvalue())
         clear_selection_and_update(self)
         self.notify(f"Copied {num_rows}x{num_cols}")
 
     def save_selection_dialog(self) -> None:
-        if self.cached_page_df is None or self.loop is None:
+        if not self.cached_rows or self.loop is None:
             return
 
         def _on_submit(filename: str) -> None:
@@ -629,7 +662,7 @@ class CSVViewerApp:
         self.show_overlay(dialog)
 
     def _save_to_file(self, file_path: str) -> None:
-        if self.cached_page_df is None:
+        if not self.cached_rows:
             self.notify("No data to save")
             return
         target = Path(file_path)
@@ -637,14 +670,16 @@ class CSVViewerApp:
             self.notify(f"File {target} exists")
             return
         try:
-            if self.selection_active:
-                df_to_save = create_selected_dataframe(self)
-                num_rows, num_cols = get_selection_dimensions(self)
-            else:
-                df_to_save = self.cached_page_df
-                num_rows = df_to_save.height
-                num_cols = len(df_to_save.columns)
-            df_to_save.write_csv(target, include_header=True)
+            selected_rows = create_selected_dataframe(self)
+            num_rows, num_cols = get_selection_dimensions(self)
+            _row_start, _row_end, col_start, col_end = get_selection_dimensions(
+                self, as_bounds=True
+            )
+            headers = self.column_names[col_start : col_end + 1]
+            with target.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(selected_rows)
             clear_selection_and_update(self)
             self.notify(f"Saved {num_rows}x{num_cols} to {target.name}")
         except Exception as exc:  # noqa: BLE001
@@ -684,7 +719,7 @@ class CSVViewerApp:
             self.loop.set_alarm_in(duration, lambda *_: self._update_status())
 
     def _update_status(self, *_args) -> None:  # noqa: ANN002, D401
-        if self.lazy_df is None:
+        if not self.con:
             return
         page_size = self._get_adaptive_page_size()
         start = self.current_page * page_size + 1
@@ -735,13 +770,19 @@ def main() -> None:
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: csvpeek <path_to_csv>")
+        print("Usage: csvpeek <path_to_csv> | --demo")
         raise SystemExit(1)
 
-    csv_path = sys.argv[1]
-    if not Path(csv_path).exists():
-        print(f"Error: File '{csv_path}' not found.")
-        raise SystemExit(1)
+    arg = sys.argv[1]
+    demo_mode = arg in {"--demo", "demo", ":demo:"}
+
+    if demo_mode:
+        csv_path = "__demo__"
+    else:
+        csv_path = arg
+        if not Path(csv_path).exists():
+            print(f"Error: File '{csv_path}' not found.")
+            raise SystemExit(1)
 
     app = CSVViewerApp(csv_path)
     app.run()

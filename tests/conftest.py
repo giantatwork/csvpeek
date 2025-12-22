@@ -1,6 +1,5 @@
 """Pytest fixtures for csvpeek tests."""
 
-import polars as pl
 import pytest
 
 
@@ -32,37 +31,6 @@ Phyllis Vance,50,Scranton,60000,Sales"""
     csv_file = tmp_path / "test_data.csv"
     csv_file.write_text(csv_content)
     return str(csv_file)
-
-
-@pytest.fixture
-def sample_dataframe():
-    """Create a sample Polars DataFrame for testing."""
-    data = {
-        "name": [
-            "John Doe",
-            "Jane Smith",
-            "Bob Johnson",
-            "Alice Williams",
-            "Charlie Brown",
-        ],
-        "age": [28, 34, 45, 29, 52],
-        "city": ["New York", "San Francisco", "Chicago", "Boston", "Seattle"],
-        "salary": [75000, 95000, 65000, 80000, 110000],
-        "department": [
-            "Engineering",
-            "Engineering",
-            "Sales",
-            "Marketing",
-            "Engineering",
-        ],
-    }
-    return pl.DataFrame(data)
-
-
-@pytest.fixture
-def sample_lazy_frame(sample_dataframe):
-    """Create a sample LazyFrame from the DataFrame."""
-    return sample_dataframe.lazy()
 
 
 @pytest.fixture
