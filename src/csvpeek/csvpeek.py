@@ -287,13 +287,14 @@ class CSVViewerApp:
         escaped = name.replace('"', '""')
         return f'"{escaped}"'
 
-    def _get_adaptive_page_size(self) -> int:
-        num_cols = len(self.column_names)
-        if num_cols > 20:
-            return max(20, self.PAGE_SIZE // 2)
-        if num_cols > 10:
-            return max(30, int(self.PAGE_SIZE * 0.8))
-        return self.PAGE_SIZE
+    def _available_body_rows(self) -> int:
+        """Estimate usable body rows based on terminal height."""
+        if not self.loop or not self.loop.screen:
+            return self.PAGE_SIZE
+        _cols, rows = self.loop.screen.get_cols_rows()
+        # Reserve lines for header (1), divider (1), footer/status (1).
+        reserved = 4
+        return max(5, rows - reserved)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -392,7 +393,7 @@ class CSVViewerApp:
     def _get_page_rows(self) -> list[tuple]:
         if not self.con:
             return []
-        page_size = self._get_adaptive_page_size()
+        page_size = self._available_body_rows()
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
         self.current_page = min(self.current_page, max_page)
         offset = self.current_page * page_size
@@ -579,7 +580,7 @@ class CSVViewerApp:
         self._refresh_rows()
 
     def next_page(self) -> None:
-        page_size = self._get_adaptive_page_size()
+        page_size = self._available_body_rows()
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
         if self.current_page < max_page:
             self.current_page += 1
@@ -781,7 +782,7 @@ class CSVViewerApp:
     def _update_status(self, *_args) -> None:  # noqa: ANN002, D401
         if not self.con:
             return
-        page_size = self._get_adaptive_page_size()
+        page_size = self._available_body_rows()
         start = self.current_page * page_size + 1
         end = min((self.current_page + 1) * page_size, self.total_filtered_rows)
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
