@@ -180,6 +180,40 @@ class HelpDialog(urwid.WidgetWrap):
         return super().keypress(size, key)
 
 
+class ConfirmDialog(urwid.WidgetWrap):
+    """Simple yes/no confirmation dialog."""
+
+    def __init__(
+        self, message: str, on_yes: Callable[[], None], on_no: Callable[[], None]
+    ) -> None:
+        yes_btn = urwid.Button("Yes", on_press=lambda *_: on_yes())
+        no_btn = urwid.Button("No", on_press=lambda *_: on_no())
+        buttons = urwid.Columns(
+            [
+                urwid.Padding(
+                    urwid.AttrMap(yes_btn, None, focus_map="focus"), left=1, right=1
+                ),
+                urwid.Padding(
+                    urwid.AttrMap(no_btn, None, focus_map="focus"), left=1, right=1
+                ),
+            ]
+        )
+        pile = urwid.Pile([urwid.Text(message), urwid.Divider(), buttons])
+        boxed = urwid.LineBox(pile, title="Confirm")
+        self.on_yes = on_yes
+        self.on_no = on_no
+        super().__init__(boxed)
+
+    def keypress(self, size, key):  # noqa: ANN001
+        if key in ("y", "Y"):
+            self.on_yes()
+            return None
+        if key in ("n", "N", "esc", "ctrl g", "q", "Q"):
+            self.on_no()
+            return None
+        return super().keypress(size, key)
+
+
 class CSVViewerApp:
     """Urwid-based CSV viewer with filtering, sorting, and selection."""
 
@@ -514,7 +548,8 @@ class CSVViewerApp:
         if self.overlaying:
             return
         if key in ("q", "Q"):
-            raise urwid.ExitMainLoop()
+            self.confirm_quit()
+            return
         if key in ("r", "R"):
             self.reset_filters()
             return
@@ -550,6 +585,19 @@ class CSVViewerApp:
             "shift down",
         ):
             self.move_cursor(key)
+
+    def confirm_quit(self) -> None:
+        if self.loop is None:
+            raise urwid.ExitMainLoop()
+
+        def _yes() -> None:
+            raise urwid.ExitMainLoop()
+
+        def _no() -> None:
+            self.close_overlay()
+
+        dialog = ConfirmDialog("Quit csvpeek?", _yes, _no)
+        self.show_overlay(dialog)
 
     def move_cursor(self, key: str) -> None:
         extend = key.startswith("shift")
@@ -758,7 +806,7 @@ class CSVViewerApp:
             align="center",
             width=("relative", 80),
             valign="middle",
-            height=("relative", 80),
+            height="pack",
         )
         self.loop.widget = overlay
         self.overlaying = True
