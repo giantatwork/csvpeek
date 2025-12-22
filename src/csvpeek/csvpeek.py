@@ -734,7 +734,11 @@ class CSVViewerApp:
             return
         if not self.selection_active:
             cell_str = get_single_cell_value(self)
-            pyperclip.copy(cell_str)
+            try:
+                pyperclip.copy(cell_str)
+            except Exception as _ex:
+                self.notify("Failed to copy cell")
+                return
             self.notify("Cell copied")
             return
         selected_rows = create_selected_dataframe(self)
@@ -749,7 +753,11 @@ class CSVViewerApp:
         writer = csv.writer(buffer)
         writer.writerow(headers)
         writer.writerows(selected_rows)
-        pyperclip.copy(buffer.getvalue())
+        try:
+            pyperclip.copy(buffer.getvalue())
+        except Exception as _ex:
+            self.notify("Failed to copy selection")
+            return
         clear_selection_and_update(self)
         self.notify(f"Copied {num_rows}x{num_cols}")
 
