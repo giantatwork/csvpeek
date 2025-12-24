@@ -597,7 +597,7 @@ class CSVViewerApp:
             self.close_overlay()
 
         dialog = ConfirmDialog("Quit csvpeek?", _yes, _no)
-        self.show_overlay(dialog)
+        self.show_overlay(dialog, width=("relative", 35))
 
     def move_cursor(self, key: str) -> None:
         extend = key.startswith("shift")
@@ -670,7 +670,8 @@ class CSVViewerApp:
             self.close_overlay()
 
         dialog = HelpDialog(_on_close)
-        self.show_overlay(dialog)
+        # Use relative height to avoid urwid sizing warnings on box widgets
+        self.show_overlay(dialog, height=("relative", 80))
 
     def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
         if not self.con:
@@ -805,14 +806,19 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     # Overlay helpers
     # ------------------------------------------------------------------
-    def show_overlay(self, widget: urwid.Widget, height: urwid.RelativeSizing | str | tuple = "pack") -> None:
+    def show_overlay(
+        self,
+        widget: urwid.Widget,
+        height: urwid.RelativeSizing | str | tuple = "pack",
+        width: urwid.RelativeSizing | str | tuple = ("relative", 80),
+    ) -> None:
         if self.loop is None:
             return
         overlay = urwid.Overlay(
             widget,
             self.loop.widget,
             align="center",
-            width=("relative", 80),
+            width=width,
             valign="middle",
             height=height,
         )
@@ -860,6 +866,7 @@ class CSVViewerApp:
     def run(self) -> None:
         self.load_csv()
         root = self.build_ui()
+        screen = urwid.raw_display.Screen()
         self.loop = urwid.MainLoop(
             root,
             palette=[
@@ -869,8 +876,12 @@ class CSVViewerApp:
                 ("filter", "light red", "default"),
                 ("focus", "white", "dark blue"),
             ],
+            screen=screen,
+            handle_mouse=False,
             unhandled_input=self.handle_input,
         )
+        # Disable mouse reporting so terminal selection works
+        self.loop.screen.set_mouse_tracking(False)
         self._refresh_rows()
 
         try:
