@@ -25,10 +25,10 @@ from csvpeek.selection_utils import (
 
 
 def _truncate(text: str, width: int) -> str:
-    """Truncate and pad text to a fixed width."""
+    """Truncate text to a fixed width without padding."""
     if len(text) > width:
         return text[: width - 1] + "…"
-    return text.ljust(width)
+    return text
 
 
 class FlowColumns(urwid.Columns):
@@ -301,20 +301,22 @@ class CSVViewerApp:
     def _calculate_column_widths(self) -> None:
         if not self.con or not self.column_names:
             return
-        sample_size = min(1000, self.total_filtered_rows)
-        rows = self.con.execute(
-            f"SELECT * FROM {self.table_name} LIMIT {sample_size}"
-        ).fetchall()
+        # Use DuckDB to compute max string length per column across the table
+        selects = [
+            f"max(length({self._quote_ident(col)})) AS len_{idx}"
+            for idx, col in enumerate(self.column_names)
+        ]
+        query = f"SELECT {', '.join(selects)} FROM {self.table_name}"
+        lengths = self.con.execute(query).fetchone()
+        if lengths is None:
+            lengths = [0] * len(self.column_names)
+
         self.column_widths = {}
         for idx, col in enumerate(self.column_names):
             header_len = len(col) + 2
-            max_len = header_len
-            for row in rows:
-                val = row[idx]
-                if val is None:
-                    continue
-                max_len = max(max_len, len(str(val)))
-            width = max(8, min(int(max_len), 40))
+            data_len = lengths[idx] or 0  # length() returns None if column is empty
+            max_len = max(header_len, int(data_len))
+            width = max(8, min(max_len, 40))
             self.column_widths[col] = width
 
     def _quote_ident(self, name: str) -> str:
