@@ -31,6 +31,10 @@ cd csvpeek
 pip install -e .
 ```
 
+#### Windows
+
+Install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) to ensure DuckDB works on Windows
+
 ### Usage
 
 ```bash
@@ -106,3 +110,5 @@ Built with amazing open-source tools:
 ## Contact
 
 Found a bug? Have a feature request? [Open an issue](https://github.com/giantatwork/csvpeek/issues)!
+
+
