@@ -238,6 +238,9 @@ class CSVViewerApp:
         self.sorted_descending = False
         self.column_widths: dict[str, int] = {}
         self.col_offset = 0  # horizontal scroll offset (column index)
+        self.row_offset = 0  # vertical scroll offset (row index)
+        self.row_buffer: list[tuple] = []
+        self.buffer_start = 0
 
         # Selection and cursor state
         self.selection_active = False
@@ -280,6 +283,8 @@ class CSVViewerApp:
             ).fetchone()[0]  # type: ignore
             self.total_filtered_rows = self.total_rows
             self._calculate_column_widths()
+            self.row_buffer = []
+            self.buffer_start = 0
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
 
@@ -316,6 +321,10 @@ class CSVViewerApp:
         # Reserve lines for header (1), divider (1), footer/status (1).
         reserved = 4
         return max(5, rows - reserved)
+
+    def _buffer_size(self) -> int:
+        body = self._available_body_rows()
+        return max(body * 4, body + 5)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -415,12 +424,31 @@ class CSVViewerApp:
         if not self.con:
             return []
         page_size = self._available_body_rows()
-        max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-        self.current_page = min(self.current_page, max_page)
-        offset = self.current_page * page_size
+        max_start = max(0, self.total_filtered_rows - page_size)
+        self.row_offset = min(self.row_offset, max_start)
+        need_start = self.row_offset
+        need_end = need_start + page_size
+        have_start = self.buffer_start
+        have_end = self.buffer_start + len(self.row_buffer)
+
+        if self.row_buffer and need_start >= have_start and need_end <= have_end:
+            start = need_start - have_start
+            end = start + page_size
+            return self.row_buffer[start:end]
+
+        self._fill_buffer(need_start)
+        start = 0
+        end = min(page_size, len(self.row_buffer))
+        return self.row_buffer[start:end]
+
+    def _fill_buffer(self, start_row: int) -> None:
+        fetch_size = self._buffer_size()
         order_where, params = self._build_base_query()
         query = f"SELECT * FROM {self.table_name}{order_where} LIMIT ? OFFSET ?"
-        return self.con.execute(query, params + [page_size, offset]).fetchall()
+        self.row_buffer = self.con.execute(
+            query, params + [fetch_size, start_row]
+        ).fetchall()
+        self.buffer_start = start_row
 
     def _refresh_rows(self) -> None:
         if not self.con:
@@ -601,9 +629,20 @@ class CSVViewerApp:
         if key.endswith("right"):
             self.cursor_col = min(cols - 1, self.cursor_col + 1)
         if key.endswith("up"):
-            self.cursor_row = max(0, self.cursor_row - 1)
+            if self.cursor_row > 0:
+                self.cursor_row -= 1
+            elif self.row_offset > 0:
+                self.row_offset -= 1
+                self._refresh_rows()
+                return
         if key.endswith("down"):
-            self.cursor_row = min(rows - 1, self.cursor_row + 1)
+            if self.cursor_row < rows - 1:
+                self.cursor_row += 1
+            elif self.row_offset + self.cursor_row + 1 < self.total_filtered_rows:
+                self.row_offset += 1
+                self.selection_active = False if not extend else self.selection_active
+                self._refresh_rows()
+                return
 
         if not extend:
             self.selection_active = False
@@ -616,16 +655,16 @@ class CSVViewerApp:
 
     def next_page(self) -> None:
         page_size = self._available_body_rows()
-        max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-        if self.current_page < max_page:
-            self.current_page += 1
+        max_start = max(0, self.total_filtered_rows - page_size)
+        if self.row_offset < max_start:
+            self.row_offset = min(self.row_offset + page_size, max_start)
             self.cursor_row = 0
             self.selection_active = False
             self._refresh_rows()
 
     def prev_page(self) -> None:
-        if self.current_page > 0:
-            self.current_page -= 1
+        if self.row_offset > 0:
+            self.row_offset = max(0, self.row_offset - self._available_body_rows())
             self.cursor_row = 0
             self.selection_active = False
             self._refresh_rows()
@@ -681,6 +720,9 @@ class CSVViewerApp:
         count_query = f"SELECT count(*) FROM {self.table_name}{where}"
         self.total_filtered_rows = self.con.execute(count_query, params).fetchone()[0]  # type: ignore
         self.current_page = 0
+        self.row_offset = 0
+        self.row_buffer = []
+        self.buffer_start = 0
         self.cursor_row = 0
         self._refresh_rows()
 
@@ -692,6 +734,9 @@ class CSVViewerApp:
         self.filter_where = ""
         self.filter_params = []
         self.current_page = 0
+        self.row_offset = 0
+        self.row_buffer = []
+        self.buffer_start = 0
         self.cursor_row = 0
         self.total_filtered_rows = self.total_rows
         self._refresh_rows()
@@ -709,6 +754,9 @@ class CSVViewerApp:
             self.sorted_column = col_name
             self.sorted_descending = False
         self.current_page = 0
+        self.row_offset = 0
+        self.row_buffer = []
+        self.buffer_start = 0
         self.cursor_row = 0
         self._refresh_rows()
         direction = "descending" if self.sorted_descending else "ascending"
@@ -833,14 +881,16 @@ class CSVViewerApp:
             return
         page_size = self._available_body_rows()
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
+        page_idx = self.row_offset // page_size
+        row_number = self.row_offset + self.cursor_row + 1
         selection_info = ""
 
         if self.selection_active:
             rows, cols = get_selection_dimensions(self)
             selection_info = f"SELECT {rows}x{cols} | "
 
-        page_info = f"Page {self.current_page + 1}/{max_page + 1}"
-        row_info = f"Row: {self.current_page * page_size + self.cursor_row + 1}/{self.total_filtered_rows}"
+        page_info = f"Page {page_idx + 1}/{max_page + 1}"
+        row_info = f"Row: {row_number}/{self.total_filtered_rows}"
         col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
 
         status = f"{page_info} {row_info}, {col_info} {selection_info} Press ? for help"
