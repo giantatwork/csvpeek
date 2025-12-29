@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover
     from csvpeek.csvpeek import CSVViewerApp
@@ -28,7 +28,7 @@ def get_selection_bounds(app: "CSVViewerApp") -> tuple[int, int, int, int]:
     return row_start, row_end, col_start, col_end
 
 
-def create_selected_dataframe(app: "CSVViewerApp") -> list[list]:
+def create_selected_dataframe(app: "CSVViewerApp") -> Sequence[Sequence]:
     """Return selected rows for CSV export."""
     row_start, row_end, col_start, col_end = get_selection_bounds(app)
     if not app.cached_rows:

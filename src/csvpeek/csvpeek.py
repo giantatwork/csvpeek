@@ -247,6 +247,7 @@ class CSVViewerApp:
         self.selection_end_col: Optional[int] = None
         self.cursor_row = 0
         self.cursor_col = 0
+        self.total_columns = 0
 
         # UI state
         self.loop: Optional[urwid.MainLoop] = None
@@ -262,34 +263,18 @@ class CSVViewerApp:
     def load_csv(self) -> None:
         try:
             self.con = duckdb.connect(database=":memory:")
-            if str(self.csv_path) == "__demo__":
-                size = 50_000
-                self.con.execute(
-                    f"""
-                    CREATE TABLE {self.table_name} AS
-                    SELECT
-                        CAST(i AS VARCHAR) AS id,
-                        CAST(i % 10 AS VARCHAR) AS "group",
-                        CAST(i % 5 AS VARCHAR) AS category,
-                        CAST(i * 11 AS VARCHAR) AS value,
-                        'row ' || CAST(i AS VARCHAR) AS text
-                    FROM range(?) t(i)
-                    """,
-                    [size],
-                )
-            else:
-                self.con.execute(
-                    f"""
-                    CREATE TABLE {self.table_name} AS
-                    SELECT * FROM read_csv_auto(?, ALL_VARCHAR=TRUE)
-                    """,
-                    [str(self.csv_path)],
-                )
-
+            self.con.execute(
+                f"""
+                CREATE TABLE {self.table_name} AS
+                SELECT * FROM read_csv_auto(?, ALL_VARCHAR=TRUE)
+                """,
+                [str(self.csv_path)],
+            )
             info = self.con.execute(
                 f"PRAGMA table_info('{self.table_name}')"
             ).fetchall()
             self.column_names = [row[1] for row in info]
+            self.total_columns = len(self.column_names)
             self.total_rows = self.con.execute(
                 f"SELECT count(*) FROM {self.table_name}"
             ).fetchone()[0]  # type: ignore
@@ -847,19 +832,19 @@ class CSVViewerApp:
         if not self.con:
             return
         page_size = self._available_body_rows()
-        start = self.current_page * page_size + 1
-        end = min((self.current_page + 1) * page_size, self.total_filtered_rows)
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-        selection_text = ""
+        selection_info = ""
+
         if self.selection_active:
             rows, cols = get_selection_dimensions(self)
-            selection_text = f"SELECT {rows}x{cols} | "
-        status = (
-            f"{selection_text}Page {self.current_page + 1}/{max_page + 1} "
-            f"({start:,}-{end:,} of {self.total_filtered_rows:,}) | "
-            f"Columns: {len(self.column_names) if self.column_names else '…'}"
-            " Press ? for help"
-        )
+            selection_info = f"SELECT {rows}x{cols} | "
+
+        page_info = f"Page {self.current_page + 1}/{max_page + 1}"
+        row_info = f"Row: {self.current_page * page_size + self.cursor_row + 1}/{self.total_filtered_rows}"
+        col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
+
+        status = f"{page_info} {row_info}, {col_info} {selection_info} Press ? for help"
+
         self.status_widget.set_text(status)
 
     # ------------------------------------------------------------------
