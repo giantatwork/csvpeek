@@ -427,7 +427,7 @@ class CSVViewerApp:
         max_start = max(0, self.total_filtered_rows - page_size)
         self.row_offset = min(self.row_offset, max_start)
         need_start = self.row_offset
-        need_end = need_start + page_size
+        need_end = min(need_start + page_size, self.total_filtered_rows)
         have_start = self.buffer_start
         have_end = self.buffer_start + len(self.row_buffer)
 
