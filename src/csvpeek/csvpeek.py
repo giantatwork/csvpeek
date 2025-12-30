@@ -218,8 +218,29 @@ class CSVViewerApp:
     """Urwid-based CSV viewer with filtering, sorting, and selection."""
 
     PAGE_SIZE = 50
+    BASE_PALETTE = [
+        ("header", "black", "light gray"),
+        ("status", "light gray", "dark gray"),
+        ("cell_selected", "black", "yellow"),
+        ("filter", "light red", "default"),
+        ("focus", "white", "dark blue"),
+    ]
+    DEFAULT_COLUMN_COLORS = [
+        "light cyan",
+        "light magenta",
+        "light green",
+        "yellow",
+        "light blue",
+        "light red",
+    ]
 
-    def __init__(self, csv_path: str) -> None:
+    def __init__(
+        self,
+        csv_path: str,
+        *,
+        color_columns: bool = False,
+        column_colors: Optional[list[str]] = None,
+    ) -> None:
         self.csv_path = Path(csv_path)
         self.con: Optional[duckdb.DuckDBPyConnection] = None
         self.table_name = "data"
@@ -241,6 +262,9 @@ class CSVViewerApp:
         self.row_offset = 0  # vertical scroll offset (row index)
         self.row_buffer: list[tuple] = []
         self.buffer_start = 0
+        self.color_columns = color_columns or bool(column_colors)
+        self.column_colors = column_colors or []
+        self.column_color_attrs: list[str] = []
 
         # Selection and cursor state
         self.selection_active = False
@@ -326,6 +350,31 @@ class CSVViewerApp:
         body = self._available_body_rows()
         return max(body * 4, body + 5)
 
+    def _column_attr(self, col_idx: int) -> Optional[str]:
+        if not self.color_columns or not self.column_color_attrs:
+            return None
+        if col_idx < len(self.column_color_attrs):
+            return self.column_color_attrs[col_idx]
+        return None
+
+    def _build_palette(self) -> list[tuple]:
+        palette = list(self.BASE_PALETTE)
+        if not self.color_columns:
+            self.column_color_attrs = []
+            return palette
+
+        self.column_color_attrs = []
+        colors = self.column_colors or self.DEFAULT_COLUMN_COLORS
+        if not colors:
+            return palette
+
+        for idx, _col in enumerate(self.column_names):
+            attr = f"col{idx}"
+            color = colors[idx % len(colors)]
+            palette.append((attr, color, "default"))
+            self.column_color_attrs.append(attr)
+        return palette
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -354,7 +403,11 @@ class CSVViewerApp:
             if self.sorted_column == col:
                 label = f"{col} {'▼' if self.sorted_descending else '▲'}"
             width = self.column_widths.get(col, 12)
-            cols.append((width, urwid.Text(_truncate(label, width), wrap="clip")))
+            header_text = urwid.Text(_truncate(label, width), wrap="clip")
+            attr = self._column_attr(self.column_names.index(col))
+            if attr:
+                header_text = urwid.AttrMap(header_text, attr)
+            cols.append((width, header_text))
         return urwid.Columns(cols, dividechars=1)
 
     def _current_screen_width(self) -> int:
@@ -498,6 +551,9 @@ class CSVViewerApp:
             filter_info = self.filter_patterns.get(col_name)
             markup = self._cell_markup(str(cell or ""), width, filter_info, is_selected)
             text = urwid.Text(markup, wrap="clip")
+            attr = self._column_attr(col_idx)
+            if attr:
+                text = urwid.AttrMap(text, attr)
             cells.append((width, text))
         return FlowColumns(cells, dividechars=1)
 
@@ -881,8 +937,8 @@ class CSVViewerApp:
             return
         page_size = self._available_body_rows()
         max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-        page_idx = self.row_offset // page_size
-        row_number = self.row_offset + self.cursor_row + 1
+        row_number = self.row_offset + self.cursor_row
+        page_idx = row_number // page_size
         selection_info = ""
 
         if self.selection_active:
@@ -890,7 +946,7 @@ class CSVViewerApp:
             selection_info = f"SELECT {rows}x{cols} | "
 
         page_info = f"Page {page_idx + 1}/{max_page + 1}"
-        row_info = f"Row: {row_number}/{self.total_filtered_rows}"
+        row_info = f"Row: {row_number + 1}/{self.total_filtered_rows}"
         col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
 
         status = f"{page_info} {row_info}, {col_info} {selection_info} Press ? for help"
@@ -904,15 +960,10 @@ class CSVViewerApp:
         self.load_csv()
         root = self.build_ui()
         screen = urwid.raw_display.Screen()
+        palette = self._build_palette()
         self.loop = urwid.MainLoop(
             root,
-            palette=[
-                ("header", "black", "light gray"),
-                ("status", "light gray", "dark gray"),
-                ("cell_selected", "black", "yellow"),
-                ("filter", "light red", "default"),
-                ("focus", "white", "dark blue"),
-            ],
+            palette=palette,
             screen=screen,
             handle_mouse=False,
             unhandled_input=self.handle_input,
@@ -933,24 +984,15 @@ class CSVViewerApp:
 
 
 def main() -> None:
-    import sys
+    from csvpeek.main import parse_args
 
-    if len(sys.argv) < 2:
-        print("Usage: csvpeek <path_to_csv> | --demo")
-        raise SystemExit(1)
+    args, csv_path, colors = parse_args()
 
-    arg = sys.argv[1]
-    demo_mode = arg in {"--demo", "demo", ":demo:"}
-
-    if demo_mode:
-        csv_path = "__demo__"
-    else:
-        csv_path = arg
-        if not Path(csv_path).exists():
-            print(f"Error: File '{csv_path}' not found.")
-            raise SystemExit(1)
-
-    app = CSVViewerApp(csv_path)
+    app = CSVViewerApp(
+        csv_path,
+        color_columns=args.color_columns or bool(colors),
+        column_colors=colors,
+    )
     app.run()
 
 
