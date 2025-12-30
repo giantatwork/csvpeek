@@ -9,209 +9,36 @@ import csv
 import gc
 import re
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
-import duckdb
 import pyperclip
 import urwid
 
+from csvpeek.duck import DuckBackend
 from csvpeek.filters import build_where_clause
+from csvpeek.screen_buffer import ScreenBuffer
 from csvpeek.selection_utils import (
     clear_selection_and_update,
     create_selected_dataframe,
     get_selection_dimensions,
     get_single_cell_value,
 )
-
-
-def _truncate(text: str, width: int) -> str:
-    """Truncate text to a fixed width without padding."""
-    if len(text) > width:
-        return text[: width - 1] + "…"
-    return text
-
-
-class FlowColumns(urwid.Columns):
-    """Columns that behave as a 1-line flow widget for ListBox rows."""
-
-    sizing = frozenset(["flow"])
-
-    def rows(self, size, focus=False):  # noqa: ANN001, D401
-        return 1
-
-
-class PagingListBox(urwid.ListBox):
-    """ListBox that routes page keys to app-level pagination."""
-
-    def __init__(self, app: "CSVViewerApp", body):
-        self.app = app
-        super().__init__(body)
-
-    def keypress(self, size, key):  # noqa: ANN001
-        if getattr(self.app, "overlaying", False):
-            return super().keypress(size, key)
-        if key in ("page down", "ctrl d"):
-            self.app.next_page()
-            return None
-        if key in ("page up", "ctrl u"):
-            self.app.prev_page()
-            return None
-        return super().keypress(size, key)
-
-
-class FilterDialog(urwid.WidgetWrap):
-    """Modal dialog to collect per-column filters."""
-
-    def __init__(
-        self,
-        columns: list[str],
-        current_filters: dict[str, str],
-        on_submit: Callable[[dict[str, str]], None],
-        on_cancel: Callable[[], None],
-    ) -> None:
-        self.columns = columns
-        self.current_filters = current_filters
-        self.on_submit = on_submit
-        self.on_cancel = on_cancel
-
-        self.edits: list[urwid.Edit] = []
-        edit_rows = []
-        pad_width = max((len(c) for c in self.columns), default=0) + 1
-        for col in self.columns:
-            label = f"{col.ljust(pad_width)}: "
-            edit = urwid.Edit(label, current_filters.get(col, ""))
-            self.edits.append(edit)
-            edit_rows.append(urwid.AttrMap(edit, None, focus_map="focus"))
-        self.walker = urwid.SimpleFocusListWalker(edit_rows)
-        listbox = urwid.ListBox(self.walker)
-        instructions = urwid.Padding(
-            urwid.Text("Tab to move, Enter to apply, Esc to cancel"), left=1, right=1
-        )
-        frame = urwid.Frame(body=listbox, header=instructions)
-        boxed = urwid.LineBox(frame, title="Filters")
-        super().__init__(boxed)
-
-    def keypress(self, size, key):  # noqa: ANN001
-        if key == "tab":
-            self._move_focus(1)
-            return None
-        if key == "shift tab":
-            self._move_focus(-1)
-            return None
-        if key in ("enter",):
-            filters = {
-                col: edit.edit_text for col, edit in zip(self.columns, self.edits)
-            }
-            self.on_submit(filters)
-            return None
-        if key in ("esc", "ctrl g"):
-            self.on_cancel()
-            return None
-        return super().keypress(size, key)
-
-    def _move_focus(self, delta: int) -> None:
-        if not self.walker:
-            return
-        focus = self.walker.focus or 0
-        self.walker.focus = (focus + delta) % len(self.walker)
-
-
-class FilenameDialog(urwid.WidgetWrap):
-    """Modal dialog for choosing a filename."""
-
-    def __init__(
-        self,
-        prompt: str,
-        on_submit: Callable[[str], None],
-        on_cancel: Callable[[], None],
-    ) -> None:
-        self.edit = urwid.Edit(f"{prompt}: ")
-        self.on_submit = on_submit
-        self.on_cancel = on_cancel
-        pile = urwid.Pile(
-            [
-                urwid.Text("Enter filename and press Enter"),
-                urwid.Divider(),
-                urwid.AttrMap(self.edit, None, focus_map="focus"),
-            ]
-        )
-        boxed = urwid.LineBox(pile, title="Save Selection")
-        super().__init__(urwid.Filler(boxed, valign="top"))
-
-    def keypress(self, size, key):  # noqa: ANN001
-        if key in ("enter",):
-            self.on_submit(self.edit.edit_text.strip())
-            return None
-        if key in ("esc", "ctrl g"):
-            self.on_cancel()
-            return None
-        return super().keypress(size, key)
-
-
-class HelpDialog(urwid.WidgetWrap):
-    """Modal dialog listing keyboard shortcuts."""
-
-    def __init__(self, on_close: Callable[[], None]) -> None:
-        shortcuts = [
-            ("?", "Show this help"),
-            ("q", "Quit"),
-            ("r", "Reset filters"),
-            ("/", "Open filter dialog"),
-            ("s", "Sort by current column (toggle asc/desc)"),
-            ("c", "Copy cell or selection"),
-            ("w", "Save selection to CSV"),
-            ("←/→/↑/↓", "Move cursor"),
-            ("Shift + arrows", "Extend selection"),
-            ("PgUp / Ctrl+U", "Previous page"),
-            ("PgDn / Ctrl+D", "Next page"),
-        ]
-        rows = [urwid.Text("Keyboard Shortcuts", align="center"), urwid.Divider()]
-        for key, desc in shortcuts:
-            rows.append(urwid.Columns([(12, urwid.Text(key)), urwid.Text(desc)]))
-        body = urwid.ListBox(urwid.SimpleFocusListWalker(rows))
-        boxed = urwid.LineBox(body)
-        self.on_close = on_close
-        super().__init__(boxed)
-
-    def keypress(self, size, key):  # noqa: ANN001
-        if key in ("esc", "enter", "q", "?", "ctrl g"):
-            self.on_close()
-            return None
-        return super().keypress(size, key)
-
-
-class ConfirmDialog(urwid.WidgetWrap):
-    """Simple yes/no confirmation dialog."""
-
-    def __init__(
-        self, message: str, on_yes: Callable[[], None], on_no: Callable[[], None]
-    ) -> None:
-        yes_btn = urwid.Button("Yes", on_press=lambda *_: on_yes())
-        no_btn = urwid.Button("No", on_press=lambda *_: on_no())
-        buttons = urwid.Columns(
-            [
-                urwid.Padding(
-                    urwid.AttrMap(yes_btn, None, focus_map="focus"), left=1, right=1
-                ),
-                urwid.Padding(
-                    urwid.AttrMap(no_btn, None, focus_map="focus"), left=1, right=1
-                ),
-            ]
-        )
-        pile = urwid.Pile([urwid.Text(message), urwid.Divider(), buttons])
-        boxed = urwid.LineBox(pile, title="Confirm")
-        self.on_yes = on_yes
-        self.on_no = on_no
-        super().__init__(boxed)
-
-    def keypress(self, size, key):  # noqa: ANN001
-        if key in ("y", "Y"):
-            self.on_yes()
-            return None
-        if key in ("n", "N", "esc", "ctrl g", "q", "Q"):
-            self.on_no()
-            return None
-        return super().keypress(size, key)
+from csvpeek.ui import (
+    ConfirmDialog,
+    FilenameDialog,
+    FilterDialog,
+    FlowColumns,
+    HelpDialog,
+    PagingListBox,
+    _truncate,
+    available_body_rows,
+    buffer_size,
+    build_header_row,
+    build_ui,
+    current_screen_width,
+    update_status,
+    visible_column_names,
+)
 
 
 class CSVViewerApp:
@@ -242,8 +69,7 @@ class CSVViewerApp:
         column_colors: Optional[list[str]] = None,
     ) -> None:
         self.csv_path = Path(csv_path)
-        self.con: Optional[duckdb.DuckDBPyConnection] = None
-        self.table_name = "data"
+        self.db: Optional[DuckBackend] = None
         self.cached_rows: list[tuple] = []
         self.column_names: list[str] = []
 
@@ -260,11 +86,10 @@ class CSVViewerApp:
         self.column_widths: dict[str, int] = {}
         self.col_offset = 0  # horizontal scroll offset (column index)
         self.row_offset = 0  # vertical scroll offset (row index)
-        self.row_buffer: list[tuple] = []
-        self.buffer_start = 0
         self.color_columns = color_columns or bool(column_colors)
         self.column_colors = column_colors or []
         self.column_color_attrs: list[str] = []
+        self.screen_buffer = ScreenBuffer(self._fetch_rows)
 
         # Selection and cursor state
         self.selection_active = False
@@ -289,66 +114,16 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     def load_csv(self) -> None:
         try:
-            self.con = duckdb.connect(database=":memory:")
-            self.con.execute(
-                f"""
-                CREATE TABLE {self.table_name} AS
-                SELECT * FROM read_csv_auto(?, ALL_VARCHAR=TRUE)
-                """,
-                [str(self.csv_path)],
-            )
-            info = self.con.execute(
-                f"PRAGMA table_info('{self.table_name}')"
-            ).fetchall()
-            self.column_names = [row[1] for row in info]
+            self.db = DuckBackend(self.csv_path)
+            self.db.load()
+            self.column_names = list(self.db.column_names)
             self.total_columns = len(self.column_names)
-            self.total_rows = self.con.execute(
-                f"SELECT count(*) FROM {self.table_name}"
-            ).fetchone()[0]  # type: ignore
+            self.total_rows = self.db.total_rows
             self.total_filtered_rows = self.total_rows
-            self._calculate_column_widths()
-            self.row_buffer = []
-            self.buffer_start = 0
+            self.column_widths = self.db.column_widths()
+            self.screen_buffer.reset()
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
-
-    def _calculate_column_widths(self) -> None:
-        if not self.con or not self.column_names:
-            return
-        # Use DuckDB to compute max string length per column across the table
-        selects = [
-            f"max(length({self._quote_ident(col)})) AS len_{idx}"
-            for idx, col in enumerate(self.column_names)
-        ]
-        query = f"SELECT {', '.join(selects)} FROM {self.table_name}"
-        lengths = self.con.execute(query).fetchone()
-        if lengths is None:
-            lengths = [0] * len(self.column_names)
-
-        self.column_widths = {}
-        for idx, col in enumerate(self.column_names):
-            header_len = len(col) + 2
-            data_len = lengths[idx] or 0  # length() returns None if column is empty
-            max_len = max(header_len, int(data_len))
-            width = max(8, min(max_len, 40))
-            self.column_widths[col] = width
-
-    def _quote_ident(self, name: str) -> str:
-        escaped = name.replace('"', '""')
-        return f'"{escaped}"'
-
-    def _available_body_rows(self) -> int:
-        """Estimate usable body rows based on terminal height."""
-        if not self.loop or not self.loop.screen:
-            return self.PAGE_SIZE
-        _cols, rows = self.loop.screen.get_cols_rows()
-        # Reserve lines for header (1), divider (1), footer/status (1).
-        reserved = 4
-        return max(5, rows - reserved)
-
-    def _buffer_size(self) -> int:
-        body = self._available_body_rows()
-        return max(body * 4, body + 5)
 
     def _column_attr(self, col_idx: int) -> Optional[str]:
         if not self.color_columns or not self.column_color_attrs:
@@ -379,144 +154,46 @@ class CSVViewerApp:
     # UI construction
     # ------------------------------------------------------------------
     def build_ui(self) -> urwid.Widget:
-        header_text = urwid.Text(f"csvpeek - {self.csv_path.name}", align="center")
-        header = urwid.AttrMap(header_text, "header")
-        self.table_header = self._build_header_row(self._current_screen_width())
-        body = urwid.Pile(
-            [
-                ("pack", self.table_header),
-                ("pack", urwid.Divider("─")),
-                self.listbox,
-            ]
-        )
-        footer = urwid.AttrMap(self.status_widget, "status")
-        return urwid.Frame(body=body, header=header, footer=footer)
+        return build_ui(self)
 
-    def _build_header_row(self, max_width: Optional[int] = None) -> urwid.Columns:
-        if not self.column_names:
-            return urwid.Columns([])
-        if max_width is None:
-            max_width = self._current_screen_width()
-        cols = []
-        for col in self._visible_column_names(max_width):
-            label = col
-            if self.sorted_column == col:
-                label = f"{col} {'▼' if self.sorted_descending else '▲'}"
-            width = self.column_widths.get(col, 12)
-            header_text = urwid.Text(_truncate(label, width), wrap="clip")
-            attr = self._column_attr(self.column_names.index(col))
-            if attr:
-                header_text = urwid.AttrMap(header_text, attr)
-            cols.append((width, header_text))
-        return urwid.Columns(cols, dividechars=1)
-
-    def _current_screen_width(self) -> int:
-        if self.loop and self.loop.screen:
-            cols, _rows = self.loop.screen.get_cols_rows()
-            return max(cols, 40)
-        return 80
-
-    def _visible_column_names(self, max_width: int) -> list[str]:
-        if not self.column_names:
+    def _fetch_rows(self, start_row: int, fetch_size: int) -> list[tuple]:
+        if not self.db:
             return []
-        names = list(self.column_names)
-        widths = [self.column_widths.get(c, 12) for c in names]
-        divide = 1
-        start = min(self.col_offset, len(names) - 1 if names else 0)
-
-        # Ensure the current cursor column is within view
-        self._ensure_cursor_visible(max_width, widths)
-        start = self.col_offset
-
-        chosen: list[str] = []
-        used = 0
-        for idx in range(start, len(names)):
-            w = widths[idx]
-            extra = w if not chosen else w + divide
-            if used + extra > max_width and chosen:
-                break
-            chosen.append(names[idx])
-            used += extra
-        if not chosen and names:
-            chosen.append(names[start])
-        return chosen
-
-    def _ensure_cursor_visible(self, max_width: int, widths: list[int]) -> None:
-        if not widths:
-            return
-        divide = 1
-        col = min(self.cursor_col, len(widths) - 1)
-        # Adjust left boundary when cursor is left of offset
-        if col < self.col_offset:
-            self.col_offset = col
-            return
-
-        # If cursor is off to the right, shift offset until it fits
-        while True:
-            total = 0
-            for idx in range(self.col_offset, col + 1):
-                total += widths[idx]
-                if idx > self.col_offset:
-                    total += divide
-            if total <= max_width or self.col_offset == col:
-                break
-            self.col_offset += 1
+        return self.db.fetch_rows(
+            self.filter_where,
+            list(self.filter_params),
+            self.sorted_column,
+            self.sorted_descending,
+            fetch_size,
+            start_row,
+        )
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
-    def _build_base_query(self) -> tuple[str, list]:
-        where, params = self.filter_where, list(self.filter_params)
-        order = ""
-        if self.sorted_column:
-            direction = "DESC" if self.sorted_descending else "ASC"
-            order = f" ORDER BY {self._quote_ident(self.sorted_column)} {direction}"
-        return where + order, params
-
-    def _get_page_rows(self) -> list[tuple]:
-        if not self.con:
-            return []
-        page_size = self._available_body_rows()
-        max_start = max(0, self.total_filtered_rows - page_size)
-        self.row_offset = min(self.row_offset, max_start)
-        need_start = self.row_offset
-        need_end = min(need_start + page_size, self.total_filtered_rows)
-        have_start = self.buffer_start
-        have_end = self.buffer_start + len(self.row_buffer)
-
-        if self.row_buffer and need_start >= have_start and need_end <= have_end:
-            start = need_start - have_start
-            end = start + page_size
-            return self.row_buffer[start:end]
-
-        self._fill_buffer(need_start)
-        start = 0
-        end = min(page_size, len(self.row_buffer))
-        return self.row_buffer[start:end]
-
-    def _fill_buffer(self, start_row: int) -> None:
-        fetch_size = self._buffer_size()
-        order_where, params = self._build_base_query()
-        query = f"SELECT * FROM {self.table_name}{order_where} LIMIT ? OFFSET ?"
-        self.row_buffer = self.con.execute(
-            query, params + [fetch_size, start_row]
-        ).fetchall()
-        self.buffer_start = start_row
-
     def _refresh_rows(self) -> None:
-        if not self.con:
+        if not self.db:
             return
         if not self.selection_active:
             self.cached_rows = []
-        self.cached_rows = self._get_page_rows()
+        page_size = available_body_rows(self)
+        fetch_size = buffer_size(self)
+        rows, used_offset = self.screen_buffer.get_page_rows(
+            desired_start=self.row_offset,
+            page_size=page_size,
+            total_rows=self.total_filtered_rows,
+            fetch_size=fetch_size,
+        )
+        self.row_offset = used_offset
+        self.cached_rows = rows
         gc.collect()
-        max_width = self._current_screen_width()
+        max_width = current_screen_width(self)
         self.table_walker.clear()
         # Clamp cursor within available data
         self.cursor_row = min(self.cursor_row, max(0, len(self.cached_rows) - 1))
         self.cursor_col = min(self.cursor_col, max(0, len(self.column_names) - 1))
 
-        visible_cols = self._visible_column_names(max_width)
+        visible_cols = visible_column_names(self, max_width)
         vis_indices = [self.column_names.index(c) for c in visible_cols]
 
         for row_idx, row in enumerate(self.cached_rows):
@@ -525,7 +202,7 @@ class CSVViewerApp:
 
         if self.table_walker:
             self.table_walker.set_focus(self.cursor_row)
-        self.table_header = self._build_header_row(max_width)
+        self.table_header = build_header_row(self, max_width)
         if self.loop:
             frame_widget = self.loop.widget
             if isinstance(frame_widget, urwid.Overlay):
@@ -665,52 +342,22 @@ class CSVViewerApp:
             raise urwid.ExitMainLoop()
 
         def _no() -> None:
-            self.close_overlay()
+            from csvpeek.ui import close_overlay
+
+            close_overlay(self)
 
         dialog = ConfirmDialog("Quit csvpeek?", _yes, _no)
-        self.show_overlay(dialog, width=("relative", 35))
+        from csvpeek.ui import show_overlay
+
+        show_overlay(self, dialog, width=("relative", 35))
 
     def move_cursor(self, key: str) -> None:
-        extend = key.startswith("shift")
-        if extend and not self.selection_active:
-            self.selection_active = True
-            self.selection_start_row = self.cursor_row
-            self.selection_start_col = self.cursor_col
+        from csvpeek.ui import move_cursor
 
-        cols = len(self.column_names)
-        rows = len(self.cached_rows)
-
-        if key.endswith("left"):
-            self.cursor_col = max(0, self.cursor_col - 1)
-        if key.endswith("right"):
-            self.cursor_col = min(cols - 1, self.cursor_col + 1)
-        if key.endswith("up"):
-            if self.cursor_row > 0:
-                self.cursor_row -= 1
-            elif self.row_offset > 0:
-                self.row_offset -= 1
-                self._refresh_rows()
-                return
-        if key.endswith("down"):
-            if self.cursor_row < rows - 1:
-                self.cursor_row += 1
-            elif self.row_offset + self.cursor_row + 1 < self.total_filtered_rows:
-                self.row_offset += 1
-                self.selection_active = False if not extend else self.selection_active
-                self._refresh_rows()
-                return
-
-        if not extend:
-            self.selection_active = False
-        else:
-            self.selection_end_row = self.cursor_row
-            self.selection_end_col = self.cursor_col
-        widths = [self.column_widths.get(c, 12) for c in self.column_names]
-        self._ensure_cursor_visible(self._current_screen_width(), widths)
-        self._refresh_rows()
+        move_cursor(self, key)
 
     def next_page(self) -> None:
-        page_size = self._available_body_rows()
+        page_size = available_body_rows(self)
         max_start = max(0, self.total_filtered_rows - page_size)
         if self.row_offset < max_start:
             self.row_offset = min(self.row_offset + page_size, max_start)
@@ -720,7 +367,7 @@ class CSVViewerApp:
 
     def prev_page(self) -> None:
         if self.row_offset > 0:
-            self.row_offset = max(0, self.row_offset - self._available_body_rows())
+            self.row_offset = max(0, self.row_offset - available_body_rows(self))
             self.cursor_row = 0
             self.selection_active = False
             self._refresh_rows()
@@ -733,30 +380,40 @@ class CSVViewerApp:
             return
 
         def _on_submit(filters: dict[str, str]) -> None:
-            self.close_overlay()
+            from csvpeek.ui import close_overlay
+
+            close_overlay(self)
             self.apply_filters(filters)
 
         def _on_cancel() -> None:
-            self.close_overlay()
+            from csvpeek.ui import close_overlay
+
+            close_overlay(self)
 
         dialog = FilterDialog(
             list(self.column_names), self.current_filters.copy(), _on_submit, _on_cancel
         )
-        self.show_overlay(dialog, height=("relative", 80))
+        from csvpeek.ui import show_overlay
+
+        show_overlay(self, dialog, height=("relative", 80))
 
     def open_help_dialog(self) -> None:
         if self.loop is None:
             return
 
         def _on_close() -> None:
-            self.close_overlay()
+            from csvpeek.ui import close_overlay
+
+            close_overlay(self)
 
         dialog = HelpDialog(_on_close)
         # Use relative height to avoid urwid sizing warnings on box widgets
-        self.show_overlay(dialog, height=("relative", 80))
+        from csvpeek.ui import show_overlay
+
+        show_overlay(self, dialog, height=("relative", 80))
 
     def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
-        if not self.con:
+        if not self.db:
             return
         if filters is not None:
             self.current_filters = filters
@@ -773,12 +430,10 @@ class CSVViewerApp:
         where, params = build_where_clause(self.current_filters, self.column_names)
         self.filter_where = where
         self.filter_params = params
-        count_query = f"SELECT count(*) FROM {self.table_name}{where}"
-        self.total_filtered_rows = self.con.execute(count_query, params).fetchone()[0]  # type: ignore
+        self.total_filtered_rows = self.db.count_filtered(where, params)
         self.current_page = 0
         self.row_offset = 0
-        self.row_buffer = []
-        self.buffer_start = 0
+        self.screen_buffer.reset()
         self.cursor_row = 0
         self._refresh_rows()
 
@@ -791,17 +446,14 @@ class CSVViewerApp:
         self.filter_params = []
         self.current_page = 0
         self.row_offset = 0
-        self.row_buffer = []
-        self.buffer_start = 0
+        self.screen_buffer.reset()
         self.cursor_row = 0
         self.total_filtered_rows = self.total_rows
         self._refresh_rows()
         self.notify("Filters cleared")
 
     def sort_current_column(self) -> None:
-        if not self.column_names or not self.con:
-            return
-        if not self.column_names:
+        if not self.column_names or not self.db:
             return
         col_name = self.column_names[self.cursor_col]
         if self.sorted_column == col_name:
@@ -811,8 +463,7 @@ class CSVViewerApp:
             self.sorted_descending = False
         self.current_page = 0
         self.row_offset = 0
-        self.row_buffer = []
-        self.buffer_start = 0
+        self.screen_buffer.reset()
         self.cursor_row = 0
         self._refresh_rows()
         direction = "descending" if self.sorted_descending else "ascending"
@@ -861,14 +512,20 @@ class CSVViewerApp:
             if not filename:
                 self.notify("Filename required")
                 return
-            self.close_overlay()
+            from csvpeek.ui import close_overlay
+
+            close_overlay(self)
             self._save_to_file(filename)
 
         def _on_cancel() -> None:
-            self.close_overlay()
+            from csvpeek.ui import close_overlay
+
+            close_overlay(self)
 
         dialog = FilenameDialog("Save as", _on_submit, _on_cancel)
-        self.show_overlay(dialog)
+        from csvpeek.ui import show_overlay
+
+        show_overlay(self, dialog)
 
     def _save_to_file(self, file_path: str) -> None:
         if not self.cached_rows:
@@ -897,61 +554,13 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     # Overlay helpers
     # ------------------------------------------------------------------
-    def show_overlay(
-        self,
-        widget: urwid.Widget,
-        height: urwid.RelativeSizing | str | tuple = "pack",
-        width: urwid.RelativeSizing | str | tuple = ("relative", 80),
-    ) -> None:
-        if self.loop is None:
-            return
-        overlay = urwid.Overlay(
-            widget,
-            self.loop.widget,
-            align="center",
-            width=width,
-            valign="middle",
-            height=height,
-        )
-        self.loop.widget = overlay
-        self.overlaying = True
-
-    def close_overlay(self) -> None:
-        if self.loop is None:
-            return
-        if isinstance(self.loop.widget, urwid.Overlay):
-            self.loop.widget = self.loop.widget.bottom_w
-        self.overlaying = False
-        self._refresh_rows()
-
-    # ------------------------------------------------------------------
-    # Status handling
-    # ------------------------------------------------------------------
     def notify(self, message: str, duration: float = 2.0) -> None:
         self.status_widget.set_text(message)
         if self.loop:
             self.loop.set_alarm_in(duration, lambda *_: self._update_status())
 
     def _update_status(self, *_args) -> None:  # noqa: ANN002, D401
-        if not self.con:
-            return
-        page_size = self._available_body_rows()
-        max_page = max(0, (self.total_filtered_rows - 1) // page_size)
-        row_number = self.row_offset + self.cursor_row
-        page_idx = row_number // page_size
-        selection_info = ""
-
-        if self.selection_active:
-            rows, cols = get_selection_dimensions(self)
-            selection_info = f"SELECT {rows}x{cols} | "
-
-        page_info = f"Page {page_idx + 1}/{max_page + 1}"
-        row_info = f"Row: {row_number + 1}/{self.total_filtered_rows}"
-        col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
-
-        status = f"{page_info} {row_info}, {col_info} {selection_info} Press ? for help"
-
-        self.status_widget.set_text(status)
+        update_status(self, *_args)
 
     # ------------------------------------------------------------------
     # Main entry
