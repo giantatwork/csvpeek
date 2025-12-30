@@ -10,10 +10,12 @@ class ScreenBuffer:
         self.fetch_rows = fetch_rows
         self.start = 0
         self.rows: list[tuple] = []
+        self.num_rows = 0
 
     def reset(self) -> None:
         self.start = 0
         self.rows = []
+        self.num_rows = 0
 
     def get_page_rows(
         self,
@@ -28,7 +30,7 @@ class ScreenBuffer:
         clamped_start = max(0, min(desired_start, max(0, total_rows - page_size)))
         need_end = min(clamped_start + page_size, total_rows)
         have_start = self.start
-        have_end = self.start + len(self.rows)
+        have_end = self.start + self.num_rows
 
         if self.rows and clamped_start >= have_start and need_end <= have_end:
             start = clamped_start - have_start
@@ -37,9 +39,10 @@ class ScreenBuffer:
 
         self._fill(clamped_start, fetch_size)
         start = 0
-        end = min(page_size, len(self.rows))
+        end = min(page_size, self.num_rows)
         return self.rows[start:end], clamped_start
 
     def _fill(self, start_row: int, fetch_size: int) -> None:
         self.rows = self.fetch_rows(start_row, fetch_size)
+        self.num_rows = len(self.rows)
         self.start = start_row

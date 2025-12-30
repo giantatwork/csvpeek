@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 
@@ -12,7 +11,7 @@ class DuckBackend:
     def __init__(self, csv_path: Path, table_name: str = "data") -> None:
         self.csv_path = Path(csv_path)
         self.table_name = table_name
-        self.con: Optional[duckdb.DuckDBPyConnection] = None
+        self.con: duckdb.DuckDBPyConnection | None = None
         self.column_names: list[str] = []
         self.total_rows: int = 0
 
@@ -57,9 +56,7 @@ class DuckBackend:
             widths[col] = width
         return widths
 
-    def _order_clause(
-        self, sorted_column: Optional[str], sorted_descending: bool
-    ) -> str:
+    def _order_clause(self, sorted_column: str | None, sorted_descending: bool) -> str:
         if not sorted_column:
             return ""
         direction = "DESC" if sorted_descending else "ASC"
@@ -75,7 +72,7 @@ class DuckBackend:
         self,
         where: str,
         params: list,
-        sorted_column: Optional[str],
+        sorted_column: str | None,
         sorted_descending: bool,
         limit: int,
         offset: int,

@@ -9,7 +9,6 @@ import csv
 import gc
 import re
 from pathlib import Path
-from typing import Optional
 
 import pyperclip
 import urwid
@@ -67,10 +66,10 @@ class CSVViewerApp:
         csv_path: str,
         *,
         color_columns: bool = False,
-        column_colors: Optional[list[str]] = None,
+        column_colors: list[str] | None = None,
     ) -> None:
         self.csv_path = Path(csv_path)
-        self.db: Optional[DuckBackend] = None
+        self.db: DuckBackend | None = None
         self.cached_rows: list[tuple] = []
         self.column_names: list[str] = []
 
@@ -82,7 +81,7 @@ class CSVViewerApp:
         self.filter_patterns: dict[str, tuple[str, bool]] = {}
         self.filter_where: str = ""
         self.filter_params: list = []
-        self.sorted_column: Optional[str] = None
+        self.sorted_column: str | None = None
         self.sorted_descending = False
         self.column_widths: dict[str, int] = {}
         self.col_offset = 0  # horizontal scroll offset (column index)
@@ -99,7 +98,7 @@ class CSVViewerApp:
         self.total_columns = 0
 
         # UI state
-        self.loop: Optional[urwid.MainLoop] = None
+        self.loop: urwid.MainLoop | None = None
         self.table_walker = urwid.SimpleFocusListWalker([])
         self.table_header = urwid.Columns([])
         self.listbox = PagingListBox(self, self.table_walker)
@@ -123,7 +122,7 @@ class CSVViewerApp:
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
 
-    def _column_attr(self, col_idx: int) -> Optional[str]:
+    def _column_attr(self, col_idx: int) -> str | None:
         if not self.color_columns or not self.column_color_attrs:
             return None
         if col_idx < len(self.column_color_attrs):
@@ -250,7 +249,7 @@ class CSVViewerApp:
         self,
         cell_str: str,
         width: int,
-        filter_info: Optional[tuple[str, bool]],
+        filter_info: tuple[str, bool] | None,
         is_selected: bool,
     ):
         truncated = _truncate(cell_str, width)
@@ -414,7 +413,7 @@ class CSVViewerApp:
 
         show_overlay(self, dialog, height=("relative", 80))
 
-    def apply_filters(self, filters: Optional[dict[str, str]] = None) -> None:
+    def apply_filters(self, filters: dict[str, str] | None = None) -> None:
         if not self.db:
             return
         if filters is not None:
