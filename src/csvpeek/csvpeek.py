@@ -18,6 +18,7 @@ from csvpeek.duck import DuckBackend
 from csvpeek.filters import build_where_clause
 from csvpeek.screen_buffer import ScreenBuffer
 from csvpeek.selection_utils import (
+    Selection,
     clear_selection_and_update,
     create_selected_dataframe,
     get_selection_dimensions,
@@ -92,11 +93,7 @@ class CSVViewerApp:
         self.screen_buffer = ScreenBuffer(self._fetch_rows)
 
         # Selection and cursor state
-        self.selection_active = False
-        self.selection_start_row: Optional[int] = None
-        self.selection_start_col: Optional[int] = None
-        self.selection_end_row: Optional[int] = None
-        self.selection_end_col: Optional[int] = None
+        self.selection = Selection()
         self.cursor_row = 0
         self.cursor_col = 0
         self.total_columns = 0
@@ -122,6 +119,7 @@ class CSVViewerApp:
             self.total_filtered_rows = self.total_rows
             self.column_widths = self.db.column_widths()
             self.screen_buffer.reset()
+            self.selection.clear()
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
 
@@ -174,7 +172,7 @@ class CSVViewerApp:
     def _refresh_rows(self) -> None:
         if not self.db:
             return
-        if not self.selection_active:
+        if not self.selection.active:
             self.cached_rows = []
         page_size = available_body_rows(self)
         fetch_size = buffer_size(self)
@@ -235,12 +233,18 @@ class CSVViewerApp:
         return FlowColumns(cells, dividechars=1)
 
     def _cell_selected(self, row_idx: int, col_idx: int) -> bool:
-        if not self.selection_active:
-            return row_idx == self.cursor_row and col_idx == self.cursor_col
-        row_start, row_end, col_start, col_end = get_selection_dimensions(
-            self, as_bounds=True
+        abs_row = self.row_offset + row_idx
+        if self.selection.active and self.selection.contains(
+            abs_row,
+            col_idx,
+            fallback_row=self.row_offset + self.cursor_row,
+            fallback_col=self.cursor_col,
+        ):
+            return True
+
+        return (
+            abs_row == self.row_offset + self.cursor_row and col_idx == self.cursor_col
         )
-        return row_start <= row_idx <= row_end and col_start <= col_idx <= col_end
 
     def _cell_markup(
         self,
@@ -362,14 +366,12 @@ class CSVViewerApp:
         if self.row_offset < max_start:
             self.row_offset = min(self.row_offset + page_size, max_start)
             self.cursor_row = 0
-            self.selection_active = False
             self._refresh_rows()
 
     def prev_page(self) -> None:
         if self.row_offset > 0:
             self.row_offset = max(0, self.row_offset - available_body_rows(self))
             self.cursor_row = 0
-            self.selection_active = False
             self._refresh_rows()
 
     # ------------------------------------------------------------------
@@ -434,6 +436,7 @@ class CSVViewerApp:
         self.current_page = 0
         self.row_offset = 0
         self.screen_buffer.reset()
+        self.selection.clear()
         self.cursor_row = 0
         self._refresh_rows()
 
@@ -447,6 +450,7 @@ class CSVViewerApp:
         self.current_page = 0
         self.row_offset = 0
         self.screen_buffer.reset()
+        self.selection.clear()
         self.cursor_row = 0
         self.total_filtered_rows = self.total_rows
         self._refresh_rows()
@@ -464,6 +468,7 @@ class CSVViewerApp:
         self.current_page = 0
         self.row_offset = 0
         self.screen_buffer.reset()
+        self.selection.clear()
         self.cursor_row = 0
         self._refresh_rows()
         direction = "descending" if self.sorted_descending else "ascending"
@@ -475,7 +480,7 @@ class CSVViewerApp:
     def copy_selection(self) -> None:
         if not self.cached_rows:
             return
-        if not self.selection_active:
+        if not self.selection.active:
             cell_str = get_single_cell_value(self)
             try:
                 pyperclip.copy(cell_str)

@@ -299,39 +299,42 @@ def ensure_cursor_visible(
 
 def move_cursor(app: "CSVViewerApp", key: str) -> None:
     extend = key.startswith("shift")
-    if extend and not app.selection_active:
-        app.selection_active = True
-        app.selection_start_row = app.cursor_row
-        app.selection_start_col = app.cursor_col
+
+    if extend and not app.selection.active:
+        app.selection.start(app.row_offset + app.cursor_row, app.cursor_col)
 
     cols = len(app.column_names)
     rows = len(app.cached_rows)
 
-    if key.endswith("left"):
-        app.cursor_col = max(0, app.cursor_col - 1)
-    if key.endswith("right"):
-        app.cursor_col = min(cols - 1, app.cursor_col + 1)
-    if key.endswith("up"):
-        if app.cursor_row > 0:
-            app.cursor_row -= 1
-        elif app.row_offset > 0:
-            app.row_offset -= 1
-            app._refresh_rows()
-            return
-    if key.endswith("down"):
-        if app.cursor_row < rows - 1:
-            app.cursor_row += 1
-        elif app.row_offset + app.cursor_row + 1 < app.total_filtered_rows:
-            app.row_offset += 1
-            app.selection_active = False if not extend else app.selection_active
-            app._refresh_rows()
-            return
+    cursor_row = app.cursor_row
+    cursor_col = app.cursor_col
+    row_offset = app.row_offset
 
-    if not extend:
-        app.selection_active = False
+    if key.endswith("left"):
+        cursor_col = max(0, cursor_col - 1)
+    if key.endswith("right"):
+        cursor_col = min(cols - 1, cursor_col + 1)
+    if key.endswith("up"):
+        if cursor_row > 0:
+            cursor_row -= 1
+        elif row_offset > 0:
+            row_offset -= 1
+    if key.endswith("down"):
+        if cursor_row < rows - 1:
+            cursor_row += 1
+        elif row_offset + cursor_row + 1 < app.total_filtered_rows:
+            row_offset += 1
+
+    app.cursor_row = cursor_row
+    app.cursor_col = cursor_col
+    app.row_offset = row_offset
+
+    abs_row = app.row_offset + app.cursor_row
+    if extend:
+        app.selection.extend(abs_row, app.cursor_col)
     else:
-        app.selection_end_row = app.cursor_row
-        app.selection_end_col = app.cursor_col
+        app.selection.clear()
+
     widths = [app.column_widths.get(c, 12) for c in app.column_names]
     ensure_cursor_visible(app, current_screen_width(app), widths)
     app._refresh_rows()
@@ -376,7 +379,7 @@ def update_status(app: "CSVViewerApp", *_args) -> None:  # noqa: ANN002
     page_idx = row_number // page_size
     selection_info = ""
 
-    if app.selection_active:
+    if app.selection.active:
         from csvpeek.selection_utils import get_selection_dimensions
 
         rows, cols = get_selection_dimensions(app)
