@@ -9,6 +9,7 @@ import csv
 import re
 from copy import deepcopy
 from pathlib import Path
+from typing import Sequence
 
 import pyperclip
 import urwid
@@ -16,13 +17,7 @@ import urwid
 from csvpeek.duck import DuckBackend
 from csvpeek.filters import build_where_clause
 from csvpeek.screen_buffer import ScreenBuffer
-from csvpeek.selection_utils import (
-    Selection,
-    clear_selection_and_update,
-    create_selected_dataframe,
-    get_selection_dimensions,
-    get_single_cell_value,
-)
+from csvpeek.selection_utils import Selection
 from csvpeek.ui import (
     ConfirmDialog,
     FilenameDialog,
@@ -245,37 +240,33 @@ class CSVViewerApp:
                 self.page_redraw_needed = True
                 return self._refresh_rows()
 
-            # selection
-            if self.prev_selection.active:
-                # clear old selection
-                for row_idx in range(
-                    min(self.prev_selection.anchor_row, self.prev_selection.focus_row),
-                    max(self.prev_selection.anchor_row, self.prev_selection.focus_row)
-                    + 1,
+            def refresh_selection(selection: Selection, selected: bool = False):
+                if not selection.active:
+                    return
+                if None in (
+                    selection.anchor_row,
+                    selection.focus_row,
+                    selection.anchor_col,
+                    selection.focus_col,
                 ):
-                    for col_idx in range(
-                        min(
-                            self.prev_selection.anchor_col,
-                            self.prev_selection.focus_col,
-                        ),
-                        max(
-                            self.prev_selection.anchor_col,
-                            self.prev_selection.focus_col,
-                        )
-                        + 1,
-                    ):
-                        ok_prev = refresh_cell(row_idx, col_idx, selected=False)
+                    return
 
-            if self.selection.active:
-                for row_idx in range(
-                    min(self.selection.anchor_row, self.selection.focus_row),
-                    max(self.selection.anchor_row, self.selection.focus_row) + 1,
-                ):
-                    for col_idx in range(
-                        min(self.selection.anchor_col, self.selection.focus_col),
-                        max(self.selection.anchor_col, self.selection.focus_col) + 1,
-                    ):
-                        ok_prev = refresh_cell(row_idx, col_idx, selected=True)
+                start_row_abs = min(selection.anchor_row, selection.focus_row)
+                end_row_abs = max(selection.anchor_row, selection.focus_row)
+                start_col = min(selection.anchor_col, selection.focus_col)
+                end_col = max(selection.anchor_col, selection.focus_col)
+
+                start_row_rel = start_row_abs - self.row_offset
+                end_row_rel = end_row_abs - self.row_offset
+
+                for row_idx in range(start_row_rel, end_row_rel + 1):
+                    if not (0 <= row_idx < len(self.cached_rows)):
+                        continue
+                    for col_idx in range(start_col, end_col + 1):
+                        refresh_cell(row_idx, col_idx, selected=selected)
+
+            refresh_selection(self.prev_selection, selected=False)
+            refresh_selection(self.selection, selected=True)
 
         if self.loop:
             frame_widget = self.loop.widget
@@ -541,6 +532,8 @@ class CSVViewerApp:
         self.row_offset = 0
         self.screen_buffer.reset()
         self.selection.clear()
+        self.prev_selection.clear()
+        self.cached_rows = []
         self.cursor_row = 0
         self.total_filtered_rows = self.total_rows
         self.page_redraw_needed = True
@@ -558,9 +551,14 @@ class CSVViewerApp:
             self.sorted_descending = False
         self.current_page = 0
         self.row_offset = 0
-        self.screen_buffer.reset()
-        self.selection.clear()
+        self.screen_buffer = ScreenBuffer(self._fetch_rows)
+        self.selection = Selection()
+        self.prev_selection = Selection()
+        self.cached_rows = []
         self.cursor_row = 0
+        self.cursor_col = min(self.cursor_col, max(0, len(self.column_names) - 1))
+        self.col_offset = 0
+        self.cursor_direction = ""
         self.page_redraw_needed = True
         self._refresh_rows()
         direction = "descending" if self.sorted_descending else "ascending"
@@ -569,11 +567,64 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     # Selection, copy, save
     # ------------------------------------------------------------------
+    def get_single_cell_value(self) -> str:
+        """Return the current cell value as a string."""
+        if not self.cached_rows:
+            return ""
+        row = self.cached_rows[self.cursor_row]
+        cell = row[self.cursor_col] if self.cursor_col < len(row) else None
+        return "" if cell is None else str(cell)
+
+    def _selection_bounds(self) -> tuple[int, int, int, int]:
+        """Selection bounds as (row_start, row_end, col_start, col_end)."""
+
+        cursor_abs_row = self.row_offset + self.cursor_row
+        return self.selection.bounds(cursor_abs_row, self.cursor_col)
+
+    def create_selected_dataframe(self) -> Sequence[Sequence]:
+        """Return selected rows for CSV export."""
+        if not self.db:
+            return []
+
+        row_start, row_end, col_start, col_end = self._selection_bounds()
+        fetch_count = row_end - row_start + 1
+
+        rows = self.db.fetch_rows(
+            self.filter_where,
+            list(self.filter_params),
+            self.sorted_column,
+            self.sorted_descending,
+            fetch_count,
+            row_start,
+        )
+
+        return [row[col_start : col_end + 1] for row in rows]
+
+    def clear_selection_and_update(self) -> None:
+        """Clear selection and refresh visuals."""
+        self.selection.clear()
+        self.page_redraw_needed = True
+        self._refresh_rows()
+
+    def get_selection_dimensions(
+        self, as_bounds: bool = False
+    ) -> tuple[int, int] | tuple[int, int, int, int]:
+        """Get selection dimensions or bounds.
+
+        If `as_bounds` is True, returns (row_start, row_end, col_start, col_end).
+        Otherwise returns (num_rows, num_cols).
+        """
+
+        row_start, row_end, col_start, col_end = self._selection_bounds()
+        if as_bounds:
+            return row_start, row_end, col_start, col_end
+        return row_end - row_start + 1, col_end - col_start + 1
+
     def copy_selection(self) -> None:
         if not self.cached_rows:
             return
         if not self.selection.active:
-            cell_str = get_single_cell_value(self)
+            cell_str = self.get_single_cell_value()
             try:
                 pyperclip.copy(cell_str)
             except Exception as _ex:
@@ -581,10 +632,10 @@ class CSVViewerApp:
                 return
             self.notify("Cell copied")
             return
-        selected_rows = create_selected_dataframe(self)
-        num_rows, num_cols = get_selection_dimensions(self)
-        _row_start, _row_end, col_start, col_end = get_selection_dimensions(
-            self, as_bounds=True
+        selected_rows = self.create_selected_dataframe()
+        num_rows, num_cols = self.get_selection_dimensions()
+        _row_start, _row_end, col_start, col_end = self.get_selection_dimensions(
+            as_bounds=True
         )
         headers = self.column_names[col_start : col_end + 1]
         from io import StringIO
@@ -598,7 +649,7 @@ class CSVViewerApp:
         except Exception as _ex:
             self.notify("Failed to copy selection")
             return
-        clear_selection_and_update(self)
+        self.clear_selection_and_update()
         self.notify(f"Copied {num_rows}x{num_cols}")
 
     def save_selection_dialog(self) -> None:
@@ -633,17 +684,17 @@ class CSVViewerApp:
             self.notify(f"File {target} exists")
             return
         try:
-            selected_rows = create_selected_dataframe(self)
-            num_rows, num_cols = get_selection_dimensions(self)
-            _row_start, _row_end, col_start, col_end = get_selection_dimensions(
-                self, as_bounds=True
+            selected_rows = self.create_selected_dataframe()
+            num_rows, num_cols = self.get_selection_dimensions()
+            _row_start, _row_end, col_start, col_end = self.get_selection_dimensions(
+                as_bounds=True
             )
             headers = self.column_names[col_start : col_end + 1]
             with target.open("w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
                 writer.writerows(selected_rows)
-            clear_selection_and_update(self)
+            self.clear_selection_and_update()
             self.notify(f"Saved {num_rows}x{num_cols} to {target.name}")
         except Exception as exc:  # noqa: BLE001
             self.notify(f"Error saving file: {exc}")
@@ -778,14 +829,14 @@ class CSVViewerApp:
         selection_info = ""
 
         if self.selection.active:
-            rows, cols = get_selection_dimensions(self)
+            rows, cols = self.get_selection_dimensions()
             selection_info = f"SELECT {rows}x{cols} | "
 
         page_info = f"Page {page_idx + 1}/{max_page + 1}"
         row_info = f"Row: {row_number + 1}/{self.total_filtered_rows}"
         col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
 
-        status = f"{page_info} {row_info}, {col_info} {selection_info} {self.selection} {self.prev_selection} Press ? for help"
+        status = f"{page_info} | {row_info}, {col_info} | {selection_info} | Press ? for help"
         self.status_widget.set_text(status)
 
     # ------------------------------------------------------------------

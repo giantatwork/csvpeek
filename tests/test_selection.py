@@ -1,30 +1,11 @@
-from pathlib import Path
-
-from csvpeek.duck import DuckBackend
-from csvpeek.selection_utils import (
-    Selection,
-    create_selected_dataframe,
-    get_selection_dimensions,
-)
+from csvpeek.csvpeek import CSVViewerApp
+from csvpeek.selection_utils import Selection
 
 
-class DummyApp:
-    def __init__(self, db: DuckBackend) -> None:
-        self.db = db
-        self.filter_where = ""
-        self.filter_params: list = []
-        self.sorted_column = None
-        self.sorted_descending = False
-        self.row_offset = 0
-        self.cursor_row = 0
-        self.cursor_col = 0
-        self.selection = Selection()
-
-
-def make_app(csv_path: str) -> DummyApp:
-    db = DuckBackend(Path(csv_path))
-    db.load()
-    return DummyApp(db)
+def make_app(csv_path: str) -> CSVViewerApp:
+    app = CSVViewerApp(csv_path)
+    app.load_csv()
+    return app
 
 
 def test_selection_bounds_and_dimensions() -> None:
@@ -53,7 +34,7 @@ def test_create_selected_dataframe_uses_absolute_rows(sample_csv_path: str) -> N
     app.selection.start(2, 0)
     app.selection.extend(4, 1)
 
-    selected = create_selected_dataframe(app)
+    selected = app.create_selected_dataframe()
 
     assert selected == [
         ("Bob Johnson", "45"),
@@ -68,7 +49,7 @@ def test_create_selected_dataframe_fallbacks_to_cursor(sample_csv_path: str) -> 
     app.cursor_col = 0
     app.row_offset = 0
 
-    selected = create_selected_dataframe(app)
+    selected = app.create_selected_dataframe()
 
     assert selected == [("Jane Smith",)]
-    assert get_selection_dimensions(app) == (1, 1)
+    assert app.get_selection_dimensions() == (1, 1)

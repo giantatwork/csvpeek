@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
-
 
 class Selection:
     """Tracks an anchored selection in absolute row/column coordinates."""
@@ -68,64 +66,3 @@ class Selection:
 
     def __repr__(self):
         return f"({self.anchor_row}, {self.anchor_col}) -> ({self.focus_row}, {self.focus_col})"
-
-
-if TYPE_CHECKING:  # pragma: no cover
-    from csvpeek.csvpeek import CSVViewerApp
-
-
-def get_single_cell_value(app: "CSVViewerApp") -> str:
-    """Return the current cell value as a string."""
-    if not app.cached_rows:
-        return ""
-    row = app.cached_rows[app.cursor_row]
-    cell = row[app.cursor_col] if app.cursor_col < len(row) else None
-    return "" if cell is None else str(cell)
-
-
-def get_selection_bounds(app: "CSVViewerApp") -> tuple[int, int, int, int]:
-    """Get selection bounds as (row_start, row_end, col_start, col_end)."""
-
-    cursor_abs_row = app.row_offset + app.cursor_row
-    return app.selection.bounds(cursor_abs_row, app.cursor_col)
-
-
-def create_selected_dataframe(app: "CSVViewerApp") -> Sequence[Sequence]:
-    """Return selected rows for CSV export."""
-    if not app.db:
-        return []
-
-    row_start, row_end, col_start, col_end = get_selection_bounds(app)
-    fetch_count = row_end - row_start + 1
-
-    rows = app.db.fetch_rows(
-        app.filter_where,
-        list(app.filter_params),
-        app.sorted_column,
-        app.sorted_descending,
-        fetch_count,
-        row_start,
-    )
-
-    return [row[col_start : col_end + 1] for row in rows]
-
-
-def clear_selection_and_update(app: "CSVViewerApp") -> None:
-    """Clear selection and refresh visuals."""
-    app.selection.clear()
-    app._refresh_rows()
-
-
-def get_selection_dimensions(
-    app: "CSVViewerApp", as_bounds: bool = False
-) -> tuple[int, int] | tuple[int, int, int, int]:
-    """Get selection dimensions or bounds.
-
-    If `as_bounds` is True, returns (row_start, row_end, col_start, col_end).
-    Otherwise returns (num_rows, num_cols).
-    """
-
-    row_start, row_end, col_start, col_end = get_selection_bounds(app)
-    if as_bounds:
-        return row_start, row_end, col_start, col_end
-    return row_end - row_start + 1, col_end - col_start + 1
