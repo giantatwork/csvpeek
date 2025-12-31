@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import re
+from copy import deepcopy
 from pathlib import Path
 
 import pyperclip
@@ -89,6 +90,7 @@ class CSVViewerApp:
 
         # Selection and cursor state
         self.selection = Selection()
+        self.prev_selection = Selection()
         self.cursor_row = 0
         self.cursor_col = 0
         self.total_columns = 0
@@ -242,6 +244,38 @@ class CSVViewerApp:
             if not (ok_current and ok_prev):
                 self.page_redraw_needed = True
                 return self._refresh_rows()
+
+            # selection
+            if self.prev_selection.active:
+                # clear old selection
+                for row_idx in range(
+                    min(self.prev_selection.anchor_row, self.prev_selection.focus_row),
+                    max(self.prev_selection.anchor_row, self.prev_selection.focus_row)
+                    + 1,
+                ):
+                    for col_idx in range(
+                        min(
+                            self.prev_selection.anchor_col,
+                            self.prev_selection.focus_col,
+                        ),
+                        max(
+                            self.prev_selection.anchor_col,
+                            self.prev_selection.focus_col,
+                        )
+                        + 1,
+                    ):
+                        ok_prev = refresh_cell(row_idx, col_idx, selected=False)
+
+            if self.selection.active:
+                for row_idx in range(
+                    min(self.selection.anchor_row, self.selection.focus_row),
+                    max(self.selection.anchor_row, self.selection.focus_row) + 1,
+                ):
+                    for col_idx in range(
+                        min(self.selection.anchor_col, self.selection.focus_col),
+                        max(self.selection.anchor_col, self.selection.focus_col) + 1,
+                    ):
+                        ok_prev = refresh_cell(row_idx, col_idx, selected=True)
 
         if self.loop:
             frame_widget = self.loop.widget
@@ -721,6 +755,7 @@ class CSVViewerApp:
         self.cursor_direction = direction
 
         abs_row = self.row_offset + self.cursor_row
+        self.prev_selection = deepcopy(self.selection)
         if extend:
             self.selection.extend(abs_row, self.cursor_col)
         else:
@@ -750,7 +785,7 @@ class CSVViewerApp:
         row_info = f"Row: {row_number + 1}/{self.total_filtered_rows}"
         col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
 
-        status = f"{page_info} {row_info}, {col_info} {selection_info} Press ? for help"
+        status = f"{page_info} {row_info}, {col_info} {selection_info} {self.selection} {self.prev_selection} Press ? for help"
         self.status_widget.set_text(status)
 
     # ------------------------------------------------------------------

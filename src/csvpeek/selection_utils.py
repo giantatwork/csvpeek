@@ -66,6 +66,9 @@ class Selection:
         row_start, row_end, col_start, col_end = self.bounds(fallback_row, fallback_col)
         return row_start <= row <= row_end and col_start <= col <= col_end
 
+    def __repr__(self):
+        return f"({self.anchor_row}, {self.anchor_col}) -> ({self.focus_row}, {self.focus_col})"
+
 
 if TYPE_CHECKING:  # pragma: no cover
     from csvpeek.csvpeek import CSVViewerApp
