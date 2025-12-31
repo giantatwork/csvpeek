@@ -218,7 +218,8 @@ def visible_column_names(app: "CSVViewerApp", max_width: int) -> list[str]:
     divide = 1
     start = min(app.col_offset, len(names) - 1 if names else 0)
 
-    ensure_cursor_visible(app, max_width, widths)
+    # Column visibility adjustment now lives on the app
+    app.ensure_cursor_visible(max_width, widths)
     start = app.col_offset
 
     chosen: list[str] = []
@@ -271,75 +272,6 @@ def build_ui(app: "CSVViewerApp") -> urwid.Widget:
     return urwid.Frame(body=body, header=header, footer=footer)
 
 
-# ---------------------------------------------------------------------------
-# Cursor and selection helpers
-# ---------------------------------------------------------------------------
-
-
-def ensure_cursor_visible(
-    app: "CSVViewerApp", max_width: int, widths: list[int]
-) -> None:
-    if not widths:
-        return
-    divide = 1
-    col = min(app.cursor_col, len(widths) - 1)
-    if col < app.col_offset:
-        app.col_offset = col
-        return
-    while True:
-        total = 0
-        for idx in range(app.col_offset, col + 1):
-            total += widths[idx]
-            if idx > app.col_offset:
-                total += divide
-        if total <= max_width or app.col_offset == col:
-            break
-        app.col_offset += 1
-
-
-def move_cursor(app: "CSVViewerApp", key: str) -> None:
-    extend = key.startswith("shift")
-
-    if extend and not app.selection.active:
-        app.selection.start(app.row_offset + app.cursor_row, app.cursor_col)
-
-    cols = len(app.column_names)
-    rows = len(app.cached_rows)
-
-    cursor_row = app.cursor_row
-    cursor_col = app.cursor_col
-    row_offset = app.row_offset
-
-    if key.endswith("left"):
-        cursor_col = max(0, cursor_col - 1)
-    if key.endswith("right"):
-        cursor_col = min(cols - 1, cursor_col + 1)
-    if key.endswith("up"):
-        if cursor_row > 0:
-            cursor_row -= 1
-        elif row_offset > 0:
-            row_offset -= 1
-    if key.endswith("down"):
-        if cursor_row < rows - 1:
-            cursor_row += 1
-        elif row_offset + cursor_row + 1 < app.total_filtered_rows:
-            row_offset += 1
-
-    app.cursor_row = cursor_row
-    app.cursor_col = cursor_col
-    app.row_offset = row_offset
-
-    abs_row = app.row_offset + app.cursor_row
-    if extend:
-        app.selection.extend(abs_row, app.cursor_col)
-    else:
-        app.selection.clear()
-
-    widths = [app.column_widths.get(c, 12) for c in app.column_names]
-    ensure_cursor_visible(app, current_screen_width(app), widths)
-    app._refresh_rows()
-
-
 def show_overlay(
     app: "CSVViewerApp",
     widget: urwid.Widget,
@@ -368,40 +300,3 @@ def close_overlay(app: "CSVViewerApp") -> None:
         app.loop.widget = app.loop.widget.bottom_w
     app.overlaying = False
     app._refresh_rows()
-
-
-def update_status(app: "CSVViewerApp", *_args) -> None:  # noqa: ANN002
-    if not app.db:
-        return
-    page_size = available_body_rows(app)
-    max_page = max(0, (app.total_filtered_rows - 1) // page_size)
-    row_number = app.row_offset + app.cursor_row
-    page_idx = row_number // page_size
-    selection_info = ""
-
-    if app.selection.active:
-        from csvpeek.selection_utils import get_selection_dimensions
-
-        rows, cols = get_selection_dimensions(app)
-        selection_info = f"SELECT {rows}x{cols} | "
-
-    page_info = f"Page {page_idx + 1}/{max_page + 1}"
-    row_info = f"Row: {row_number + 1}/{app.total_filtered_rows}"
-    col_info = f"Col: {app.cursor_col + 1}/{app.total_columns}"
-
-    status = f"{page_info} {row_info}, {col_info} {selection_info} Press ? for help"
-    app.status_widget.set_text(status)
-
-
-def available_body_rows(app: "CSVViewerApp") -> int:
-    """Estimate usable body rows based on terminal height."""
-    if not app.loop or not app.loop.screen:
-        return app.PAGE_SIZE
-    _cols, rows = app.loop.screen.get_cols_rows()
-    reserved = 4  # header, divider, footer
-    return max(5, rows - reserved)
-
-
-def buffer_size(app: "CSVViewerApp") -> int:
-    body = available_body_rows(app)
-    return max(body * 4, body + 5)
