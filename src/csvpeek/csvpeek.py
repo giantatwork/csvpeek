@@ -190,17 +190,11 @@ class CSVViewerApp:
         visible_cols = visible_column_names(self, max_width)
         vis_indices = [self.column_names.index(c) for c in visible_cols]
 
-        # this is expensive
-        # if only cursor is moved and no scrolling then only redraw selected an next selection cell background
-        # [("cell_selected", truncated)]
         if self.page_redraw_needed:
             self.table_walker.clear()
             for row_idx, row in enumerate(self.cached_rows):
                 row_widget = self._build_row_widget(row_idx, row, vis_indices)
                 self.table_walker.append(row_widget)
-            if self.table_walker:
-                # self.table_walker.set_focus(self.cursor_row)
-                pass
             self.table_header = build_header_row(self, max_width)
         else:
 
@@ -659,19 +653,21 @@ class CSVViewerApp:
             return
         divide = 1
         col = min(self.cursor_col, len(widths) - 1)
+        prev_offset = self.col_offset
         if col < self.col_offset:
             self.col_offset = col
-            return
-        while True:
-            total = 0
-            for idx in range(self.col_offset, col + 1):
-                total += widths[idx]
-                if idx > self.col_offset:
-                    total += divide
-            if total <= max_width or self.col_offset == col:
-                break
+        else:
+            for _ in range(len(widths)):
+                total = 0
+                for idx in range(self.col_offset, col + 1):
+                    total += widths[idx]
+                    if idx > self.col_offset:
+                        total += divide
+                if total <= max_width or self.col_offset == col:
+                    break
+                self.col_offset += 1
+        if self.col_offset != prev_offset:
             self.page_redraw_needed = True
-            self.col_offset += 1
 
     def move_cursor(self, key: str) -> None:
         extend = key.startswith("shift")
