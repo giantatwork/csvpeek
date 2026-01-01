@@ -371,21 +371,18 @@ class CSVViewerApp:
         last = 0
         for start, end in matches:
             if start > last:
-                part = truncated[last:start]
-                if is_selected:
-                    segments.append(("cell_selected", part))
-                else:
-                    segments.append(part)
-            if is_selected:
-                segments.append(("cell_selected_filter", truncated[start:end]))
-            else:
-                segments.append(("filter", truncated[start:end]))
+                slice = truncated[last:start]
+                part = ("cell_selected", slice) if is_selected else slice
+                segments.append(part)
+            slice = truncated[start:end]
+            part = ("cell_selected_filter", slice) if is_selected else ("filter", slice)
+            segments.append(part)
             last = end
+
         if last < len(truncated):
-            if is_selected:
-                segments.append(("cell_selected", truncated[last:]))
-            else:
-                segments.append(truncated[last:])
+            slice = truncated[last:]
+            part = ("cell_selected", slice) if is_selected else slice
+            segments.append(slice)
 
         return segments
 
