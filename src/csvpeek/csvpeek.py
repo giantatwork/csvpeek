@@ -41,6 +41,7 @@ class CSVViewerApp:
         ("header", "black", "light gray"),
         ("status", "light gray", "dark gray"),
         ("cell_selected", "black", "yellow"),
+        ("cell_selected_filter", "light red", "yellow"),
         ("filter", "light red", "default"),
         ("focus", "white", "dark blue"),
     ]
@@ -50,7 +51,6 @@ class CSVViewerApp:
         "light green",
         "yellow",
         "light blue",
-        "light red",
     ]
 
     def __init__(
@@ -337,10 +337,10 @@ class CSVViewerApp:
         is_selected: bool,
     ):
         truncated = _truncate(cell_str, width)
-        if is_selected:
-            return [("cell_selected", truncated)]
 
         if not filter_info:
+            if is_selected:
+                return [("cell_selected", truncated)]
             return truncated
 
         pattern, is_regex = filter_info
@@ -363,17 +363,30 @@ class CSVViewerApp:
                 start = pos + 1
 
         if not matches:
+            if is_selected:
+                return [("cell_selected", truncated)]
             return truncated
 
         segments = []
         last = 0
         for start, end in matches:
             if start > last:
-                segments.append(truncated[last:start])
-            segments.append(("filter", truncated[start:end]))
+                part = truncated[last:start]
+                if is_selected:
+                    segments.append(("cell_selected", part))
+                else:
+                    segments.append(part)
+            if is_selected:
+                segments.append(("cell_selected_filter", truncated[start:end]))
+            else:
+                segments.append(("filter", truncated[start:end]))
             last = end
         if last < len(truncated):
-            segments.append(truncated[last:])
+            if is_selected:
+                segments.append(("cell_selected", truncated[last:]))
+            else:
+                segments.append(truncated[last:])
+
         return segments
 
     # ------------------------------------------------------------------
