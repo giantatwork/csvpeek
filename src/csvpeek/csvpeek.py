@@ -89,6 +89,8 @@ class CSVViewerApp:
         self.cursor_row = 0
         self.cursor_col = 0
         self.total_columns = 0
+        self.remove_cells = None
+        self.add_cells = None
 
         # UI state
         self.loop: urwid.MainLoop | None = None
@@ -234,39 +236,21 @@ class CSVViewerApp:
 
             ok_prev = True
             if self.cursor_direction:
-                ok_prev = refresh_cell(prev_cursor_row, prev_cursor_col, selected=False)
+                ok_prev = refresh_cell(
+                    prev_cursor_row,
+                    prev_cursor_col,
+                    selected=self._cell_selected(prev_cursor_row, prev_cursor_col),
+                )
 
             if not (ok_current and ok_prev):
                 self.page_redraw_needed = True
                 return self._refresh_rows()
 
-            def refresh_selection(selection: Selection, selected: bool = False):
-                if not selection.active:
-                    return
-                if None in (
-                    selection.anchor_row,
-                    selection.focus_row,
-                    selection.anchor_col,
-                    selection.focus_col,
-                ):
-                    return
+            for row_idx, col_idx in self.prev_selection.remove(self.selection):
+                refresh_cell(row_idx - self.row_offset, col_idx, selected=False)
 
-                start_row_abs = min(selection.anchor_row, selection.focus_row)
-                end_row_abs = max(selection.anchor_row, selection.focus_row)
-                start_col = min(selection.anchor_col, selection.focus_col)
-                end_col = max(selection.anchor_col, selection.focus_col)
-
-                start_row_rel = start_row_abs - self.row_offset
-                end_row_rel = end_row_abs - self.row_offset
-
-                for row_idx in range(start_row_rel, end_row_rel + 1):
-                    if not (0 <= row_idx < len(self.cached_rows)):
-                        continue
-                    for col_idx in range(start_col, end_col + 1):
-                        refresh_cell(row_idx, col_idx, selected=selected)
-
-            refresh_selection(self.prev_selection, selected=False)
-            refresh_selection(self.selection, selected=True)
+            for row_idx, col_idx in self.prev_selection.add(self.selection):
+                refresh_cell(row_idx - self.row_offset, col_idx, selected=True)
 
         if self.loop:
             frame_widget = self.loop.widget
@@ -767,6 +751,9 @@ class CSVViewerApp:
     def move_cursor(self, key: str) -> None:
         extend = key.startswith("shift")
 
+        # Capture state before mutating selection so diff repaint has the real "before".
+        prev_selection_snapshot = deepcopy(self.selection)
+
         if extend and not self.selection.active:
             self.selection.start(self.row_offset + self.cursor_row, self.cursor_col)
 
@@ -816,7 +803,8 @@ class CSVViewerApp:
         self.cursor_direction = direction
 
         abs_row = self.row_offset + self.cursor_row
-        self.prev_selection = deepcopy(self.selection)
+        self.prev_selection = prev_selection_snapshot
+
         if extend:
             self.selection.extend(abs_row, self.cursor_col)
         else:
