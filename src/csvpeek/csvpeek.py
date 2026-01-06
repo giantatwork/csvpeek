@@ -322,6 +322,10 @@ class CSVViewerApp:
     ):
         truncated = _truncate(cell_str, width)
 
+        # Use a space for empty cells when selected so the background color shows
+        if not truncated and is_selected:
+            truncated = " "
+
         if not filter_info:
             if is_selected:
                 return [("cell_selected", truncated)]
@@ -347,9 +351,11 @@ class CSVViewerApp:
                 start = pos + 1
 
         if not matches:
+            # Use a space for empty cells when selected so the background color shows
+            display_text = truncated if truncated else " " if is_selected else ""
             if is_selected:
-                return [("cell_selected", truncated)]
-            return truncated
+                return [("cell_selected", display_text)]
+            return display_text
 
         segments = []
         last = 0
@@ -366,7 +372,7 @@ class CSVViewerApp:
         if last < len(truncated):
             slice = truncated[last:]
             part = ("cell_selected", slice) if is_selected else slice
-            segments.append(slice)
+            segments.append(part)
 
         return segments
 
