@@ -16,7 +16,6 @@ import urwid
 
 from csvpeek.duck import DuckBackend
 from csvpeek.filters import build_where_clause
-from csvpeek.screen_buffer import ScreenBuffer
 from csvpeek.selection_utils import Selection
 from csvpeek.ui import (
     ConfirmDialog,
@@ -81,7 +80,6 @@ class CSVViewerApp:
         self.color_columns = color_columns or bool(column_colors)
         self.column_colors = column_colors or []
         self.column_color_attrs: list[str] = []
-        self.screen_buffer = ScreenBuffer(self._fetch_rows)
 
         # Selection and cursor state
         self.selection = Selection()
@@ -114,7 +112,6 @@ class CSVViewerApp:
             self.total_rows = self.db.total_rows
             self.total_filtered_rows = self.total_rows
             self.column_widths = self.db.column_widths()
-            self.screen_buffer.reset()
             self.selection.clear()
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
@@ -150,18 +147,6 @@ class CSVViewerApp:
     def build_ui(self) -> urwid.Widget:
         return build_ui(self)
 
-    def _fetch_rows(self, start_row: int, fetch_size: int) -> list[tuple]:
-        if not self.db:
-            return []
-        return self.db.fetch_rows(
-            self.filter_where,
-            list(self.filter_params),
-            self.sorted_column,
-            self.sorted_descending,
-            fetch_size,
-            start_row,
-        )
-
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -171,16 +156,22 @@ class CSVViewerApp:
         if not self.selection.active:
             self.cached_rows = []
         page_size = self.available_body_rows()
-        fetch_size = self.buffer_size()
-        rows, used_offset = self.screen_buffer.get_page_rows(
-            desired_start=self.row_offset,
-            page_size=page_size,
-            total_rows=self.total_filtered_rows,
-            fetch_size=fetch_size,
+
+        # Clamp row_offset to valid range
+        self.row_offset = max(
+            0, min(self.row_offset, max(0, self.total_filtered_rows - page_size))
         )
-        self.row_offset = used_offset
-        self.cached_rows = rows
-        # gc.collect()
+
+        # Fetch rows directly from database
+        self.cached_rows = self.db.fetch_rows(
+            self.filter_where,
+            list(self.filter_params),
+            self.sorted_column,
+            self.sorted_descending,
+            page_size,
+            self.row_offset,
+        )
+
         max_width = current_screen_width(self)
         # Clamp cursor within available data
         self.cursor_row = min(self.cursor_row, max(0, len(self.cached_rows) - 1))
@@ -515,7 +506,6 @@ class CSVViewerApp:
         self.total_filtered_rows = self.db.count_filtered(where, params)
         self.current_page = 0
         self.row_offset = 0
-        self.screen_buffer.reset()
         self.selection.clear()
         self.cursor_row = 0
         self.page_redraw_needed = True
@@ -530,7 +520,6 @@ class CSVViewerApp:
         self.filter_params = []
         self.current_page = 0
         self.row_offset = 0
-        self.screen_buffer.reset()
         self.selection.clear()
         self.prev_selection.clear()
         self.cached_rows = []
@@ -551,7 +540,6 @@ class CSVViewerApp:
             self.sorted_descending = False
         self.current_page = 0
         self.row_offset = 0
-        self.screen_buffer = ScreenBuffer(self._fetch_rows)
         self.selection = Selection()
         self.prev_selection = Selection()
         self.cached_rows = []
@@ -725,10 +713,6 @@ class CSVViewerApp:
         _cols, rows = self.loop.screen.get_cols_rows()
         reserved = 4  # header, divider, footer
         return max(5, rows - reserved)
-
-    def buffer_size(self) -> int:
-        body = self.available_body_rows()
-        return max(body * 4, body + 5)
 
     # ------------------------------------------------------------------
     # Cursor and selection helpers
