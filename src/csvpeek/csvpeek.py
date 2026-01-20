@@ -80,6 +80,7 @@ class CSVViewerApp:
         self.color_columns = color_columns or bool(column_colors)
         self.column_colors = column_colors or []
         self.column_color_attrs: list[str] = []
+        self.csv_delimiter = ","  # Default delimiter, will be detected on load
 
         # Selection and cursor state
         self.selection = Selection()
@@ -105,6 +106,9 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     def load_csv(self) -> None:
         try:
+            # Detect CSV delimiter from the original file
+            self.csv_delimiter = self._detect_delimiter()
+
             self.db = DuckBackend(self.csv_path)
             self.db.load()
             self.column_names = list(self.db.column_names)
@@ -115,6 +119,20 @@ class CSVViewerApp:
             self.selection.clear()
         except Exception as exc:  # noqa: BLE001
             raise SystemExit(f"Error loading CSV: {exc}") from exc
+
+    def _detect_delimiter(self) -> str:
+        """Detect the delimiter used in the CSV file."""
+        try:
+            with self.csv_path.open("r", encoding="utf-8") as f:
+                sample = f.read(8192)  # Read first 8KB for delimiter detection
+                if not sample:
+                    return ","
+                sniffer = csv.Sniffer()
+                delimiter = sniffer.sniff(sample).delimiter
+                return delimiter
+        except Exception:  # noqa: BLE001
+            # If detection fails, default to comma
+            return ","
 
     def _column_attr(self, col_idx: int) -> str | None:
         if not self.color_columns or not self.column_color_attrs:
@@ -692,7 +710,7 @@ class CSVViewerApp:
             headers = self.column_names[col_start : col_end + 1]
             try:
                 with target.open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
+                    writer = csv.writer(f, delimiter=self.csv_delimiter)
                     writer.writerow(headers)
                     writer.writerows(selected_rows)
             except Exception as exc:  # noqa: BLE001
@@ -715,7 +733,7 @@ class CSVViewerApp:
             )
             try:
                 with target.open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
+                    writer = csv.writer(f, delimiter=self.csv_delimiter)
                     writer.writerow(self.column_names)
                     writer.writerows(all_filtered_rows)
             except Exception as exc:  # noqa: BLE001
