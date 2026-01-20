@@ -644,6 +644,15 @@ class CSVViewerApp:
         if not self.cached_rows or self.loop is None:
             return
 
+        # Check if there's something to save before asking for filename
+        if (
+            not self.selection.active
+            and not self.current_filters
+            and not self.sorted_column
+        ):
+            self.notify("No selection or filter active")
+            return
+
         def _on_submit(filename: str) -> None:
             if not filename:
                 self.notify("Filename required")
@@ -671,21 +680,50 @@ class CSVViewerApp:
         if target.exists():
             self.notify(f"File {target} exists")
             return
-        try:
+
+        # Check if we have an active multi-cell selection
+        if self.selection.active:
+            # Save the selection
             selected_rows = self.create_selected_dataframe()
             num_rows, num_cols = self.get_selection_dimensions()
             _row_start, _row_end, col_start, col_end = self.get_selection_dimensions(
                 as_bounds=True
             )
             headers = self.column_names[col_start : col_end + 1]
-            with target.open("w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(headers)
-                writer.writerows(selected_rows)
+            try:
+                with target.open("w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(headers)
+                    writer.writerows(selected_rows)
+            except Exception as exc:  # noqa: BLE001
+                self.notify(f"Error saving file: {exc}")
+                return
             self.clear_selection_and_update()
             self.notify(f"Saved {num_rows}x{num_cols} to {target.name}")
-        except Exception as exc:  # noqa: BLE001
-            self.notify(f"Error saving file: {exc}")
+        elif self.current_filters or self.sorted_column:
+            # No selection, but there's an active filter or sort - save all filtered/sorted rows
+            if not self.db:
+                self.notify("No data to save")
+                return
+            all_filtered_rows = self.db.fetch_rows(
+                self.filter_where,
+                list(self.filter_params),
+                self.sorted_column,
+                self.sorted_descending,
+                self.total_filtered_rows,
+                0,
+            )
+            try:
+                with target.open("w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(self.column_names)
+                    writer.writerows(all_filtered_rows)
+            except Exception as exc:  # noqa: BLE001
+                self.notify(f"Error saving file: {exc}")
+                return
+            self.notify(
+                f"Saved {self.total_filtered_rows} filtered rows to {target.name}"
+            )
 
     # ------------------------------------------------------------------
     # Overlay helpers
