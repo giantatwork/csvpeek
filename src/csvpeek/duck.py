@@ -62,6 +62,16 @@ class DuckBackend:
         direction = "DESC" if sorted_descending else "ASC"
         return f" ORDER BY {self.quote_ident(sorted_column)} {direction}"
 
+    def _select_clause_with_stripped_newlines(self) -> str:
+        """Build a SELECT clause that strips control characters from all columns."""
+        if not self.column_names:
+            return "*"
+        selects = [
+            f"regexp_replace({self.quote_ident(col)}, '[\\x00-\\x1f\\x7f-\\x9f]', '', 'g') AS {self.quote_ident(col)}"
+            for col in self.column_names
+        ]
+        return ", ".join(selects)
+
     def count_filtered(self, where: str, params: list) -> int:
         if not self.con:
             return 0
@@ -80,5 +90,6 @@ class DuckBackend:
         if not self.con:
             return []
         order_clause = self._order_clause(sorted_column, sorted_descending)
-        query = f"SELECT * FROM {self.table_name}{where}{order_clause} LIMIT ? OFFSET ?"
+        select_clause = self._select_clause_with_stripped_newlines()
+        query = f"SELECT {select_clause} FROM {self.table_name}{where}{order_clause} LIMIT ? OFFSET ?"
         return self.con.execute(query, params + [limit, offset]).fetchall()

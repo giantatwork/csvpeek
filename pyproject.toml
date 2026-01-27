@@ -1,9 +1,9 @@
 [project]
 name = "csvpeek"
-version = "0.10.2"
+version = "0.10.3"
 description = "A snappy CSV viewer TUI - peek at your data fast"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 license = {text = "MIT"}
 authors = [
     {name = "Giant at Work", email = "info@giantatwork.nl"}
@@ -17,14 +17,14 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Terminals",
     "Topic :: Utilities",
 ]
 dependencies = [
     "duckdb>=1.1.0",
-    "urwid>=2.1.0",
+    "urwid>3.0",
     "pyperclip>=1.8.0",
 ]
 

@@ -7,7 +7,8 @@ from typing import Iterable
 
 
 def _quote_ident(name: str) -> str:
-    return f'"{name.replace('"', '""')}"'
+    repl = name.replace('"', '""')
+    return f'"{repl}"'
 
 
 def build_where_clause(
