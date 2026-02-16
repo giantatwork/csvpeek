@@ -65,11 +65,13 @@ class FilterDialog(urwid.WidgetWrap):
         pad_width = max((len(c) for c in self.columns), default=0) + 1
         for col_num, col in enumerate(self.columns):
             label = f"{col.ljust(pad_width)}: "
+            current_filter = current_filters.get(col)
+            if not current_filter:
+                if focus_val is not None and col_num == focus_col:
+                    current_filter = focus_val
             edit = urwid.Edit(
                 label,
-                current_filters.get(
-                    col, focus_val if focus_val and col_num == focus_col else ""
-                ),
+                current_filter if current_filter else "",
             )
             self.edits.append(edit)
             edit_rows.append(urwid.AttrMap(edit, None, focus_map="focus"))
