@@ -52,6 +52,8 @@ class FilterDialog(urwid.WidgetWrap):
         current_filters: dict[str, str],
         on_submit: Callable[[dict[str, str]], None],
         on_cancel: Callable[[], None],
+        focus_col: int | None = None,
+        focus_val: str | None = None,
     ) -> None:
         self.columns = columns
         self.current_filters = current_filters
@@ -61,15 +63,22 @@ class FilterDialog(urwid.WidgetWrap):
         self.edits: list[urwid.Edit] = []
         edit_rows = []
         pad_width = max((len(c) for c in self.columns), default=0) + 1
-        for col in self.columns:
+        for col_num, col in enumerate(self.columns):
             label = f"{col.ljust(pad_width)}: "
-            edit = urwid.Edit(label, current_filters.get(col, ""))
+            edit = urwid.Edit(
+                label,
+                current_filters.get(
+                    col, focus_val if focus_val and col_num == focus_col else ""
+                ),
+            )
             self.edits.append(edit)
             edit_rows.append(urwid.AttrMap(edit, None, focus_map="focus"))
         self.walker = urwid.SimpleFocusListWalker(edit_rows)
+        if self.walker and focus_col is not None:
+            self.walker.focus = max(0, min(focus_col, len(self.walker) - 1))
         listbox = urwid.ListBox(self.walker)
         instructions = urwid.Padding(
-            urwid.Text("Tab to move, Enter to apply, Esc to cancel"), left=1, right=1
+            urwid.Text("↑/↓ to move, Enter to apply, Esc to cancel"), left=1, right=1
         )
         frame = urwid.Frame(body=listbox, header=instructions)
         boxed = urwid.LineBox(frame, title="Filters")
@@ -139,8 +148,9 @@ class HelpDialog(urwid.WidgetWrap):
         shortcuts = [
             ("?", "Show this help"),
             ("q", "Quit"),
-            ("r", "Reset filters"),
-            ("/", "Open filter dialog"),
+            ("r", "Reset all filters"),
+            ("f", "Open filter dialog"),
+            ("F", "Open filter dialog and preset cursor value"),
             ("s", "Sort by current column (toggle asc/desc)"),
             ("c", "Copy cell or selection"),
             ("w", "Save selection to CSV"),

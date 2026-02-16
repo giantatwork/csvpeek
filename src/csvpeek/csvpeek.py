@@ -400,8 +400,11 @@ class CSVViewerApp:
         if key == "s":
             self.sort_current_column()
             return
-        if key in ("/",):
+        if key in ("f",):
             self.open_filter_dialog()
+            return
+        if key in ("F",):
+            self.open_filter_dialog(preset_value=True)
             return
         if key in ("ctrl d", "page down"):
             self.next_page()
@@ -466,7 +469,7 @@ class CSVViewerApp:
     # ------------------------------------------------------------------
     # Filtering and sorting
     # ------------------------------------------------------------------
-    def open_filter_dialog(self) -> None:
+    def open_filter_dialog(self, preset_value: str | None = None) -> None:
         if not self.column_names or self.loop is None:
             return
 
@@ -482,7 +485,12 @@ class CSVViewerApp:
             close_overlay(self)
 
         dialog = FilterDialog(
-            list(self.column_names), self.current_filters.copy(), _on_submit, _on_cancel
+            list(self.column_names),
+            self.current_filters.copy(),
+            _on_submit,
+            _on_cancel,
+            focus_col=self.cursor_col,
+            focus_val=self.get_single_cell_value() if preset_value else None,
         )
         from csvpeek.ui import show_overlay
 
