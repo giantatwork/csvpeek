@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import glob
+import os
 from typing import TYPE_CHECKING, Callable
 
 import urwid
@@ -112,29 +114,106 @@ class FilterDialog(urwid.WidgetWrap):
 
 
 class FilenameDialog(urwid.WidgetWrap):
-    """Modal dialog for choosing a filename."""
+    """Modal dialog for choosing a filename with Tab path-completion."""
+
+    _COMPLETION_HEIGHT = 8  # max rows shown in the completion list
 
     def __init__(
         self,
         prompt: str,
         on_submit: Callable[[str], None],
         on_cancel: Callable[[], None],
+        title: str = "Save Selection",
     ) -> None:
         self.edit = urwid.Edit(f"{prompt}: ")
         self.on_submit = on_submit
         self.on_cancel = on_cancel
-        pile = urwid.Pile(
+        self._completions: list[str] = []
+        self._completion_walker = urwid.SimpleFocusListWalker([])
+        self._completion_listbox = urwid.ListBox(self._completion_walker)
+        self._edit_attrmap = urwid.AttrMap(self.edit, None, focus_map="focus")
+        self.pile = urwid.Pile(
             [
-                urwid.Text("Enter filename and press Enter"),
+                urwid.Text("Tab to complete, Enter to confirm, Esc to cancel"),
                 urwid.Divider(),
-                urwid.AttrMap(self.edit, None, focus_map="focus"),
+                self._edit_attrmap,
             ]
         )
-        boxed = urwid.LineBox(pile, title="Save Selection")
+        boxed = urwid.LineBox(self.pile, title=title)
         super().__init__(urwid.Filler(boxed, valign="top"))
 
+    # ------------------------------------------------------------------
+    # Completion helpers
+    # ------------------------------------------------------------------
+    def _completion_adapter(self) -> "urwid.BoxAdapter | None":
+        for w, _ in self.pile.contents:
+            if isinstance(w, urwid.BoxAdapter):
+                return w
+        return None
+
+    def _show_completions(self, matches: list[str]) -> None:
+        self._completions = matches
+        self._completion_walker[:] = [
+            urwid.AttrMap(urwid.SelectableIcon(m, 0), None, focus_map="focus")
+            for m in matches
+        ]
+        if self._completion_adapter() is None:
+            height = min(len(matches), self._COMPLETION_HEIGHT)
+            self.pile.contents.append(
+                (
+                    urwid.BoxAdapter(self._completion_listbox, height),
+                    self.pile.options("pack"),
+                )
+            )
+        # Move focus to the completion list
+        self.pile.focus_position = len(self.pile.contents) - 1
+
+    def _hide_completions(self) -> None:
+        self._completions = []
+        self.pile.contents = [
+            (w, opts)
+            for w, opts in self.pile.contents
+            if not isinstance(w, urwid.BoxAdapter)
+        ]
+        # Return focus to the edit field (index 2)
+        self.pile.focus_position = 2
+
+    def _completions_focused(self) -> bool:
+        return (
+            bool(self._completions)
+            and self._completion_adapter() is not None
+            and self.pile.focus_position == len(self.pile.contents) - 1
+        )
+
+    # ------------------------------------------------------------------
+    # Input handling
+    # ------------------------------------------------------------------
     def keypress(self, size, key):  # noqa: ANN001
-        if key in ("enter",):
+        if self._completions_focused():
+            if key == "enter":
+                focus = self._completion_walker.focus or 0
+                selected = self._completions[focus]
+                self.edit.set_edit_text(selected)
+                self.edit.set_edit_pos(len(selected))
+                self._hide_completions()
+                return None
+            if key in ("esc", "ctrl g", "tab"):
+                self._hide_completions()
+                return None
+            # up/down/etc. handled by the ListBox inside
+            return super().keypress(size, key)
+
+        if key == "tab":
+            partial = self.edit.edit_text
+            matches = sorted(glob.glob(glob.escape(partial) + "*"))
+            matches = [m + "/" if os.path.isdir(m) else m for m in matches]
+            if len(matches) == 1:
+                self.edit.set_edit_text(matches[0])
+                self.edit.set_edit_pos(len(matches[0]))
+            elif len(matches) > 1:
+                self._show_completions(matches)
+            return None
+        if key == "enter":
             self.on_submit(self.edit.edit_text.strip())
             return None
         if key in ("esc", "ctrl g"):
@@ -156,6 +235,7 @@ class HelpDialog(urwid.WidgetWrap):
             ("s", "Sort by current column (toggle asc/desc)"),
             ("c", "Copy cell or selection"),
             ("w", "Save selection to CSV"),
+            ("L", "Open another CSV file"),
             ("←/→/↑/↓", "Move cursor"),
             ("Shift + arrows", "Extend selection"),
             ("PgUp / Ctrl+U", "Previous page"),

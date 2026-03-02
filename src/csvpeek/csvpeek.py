@@ -96,14 +96,7 @@ class CSVViewerApp:
         self.table_walker = urwid.SimpleFocusListWalker([])
         self.table_header = urwid.Columns([])
         self.listbox = PagingListBox(self, self.table_walker)
-        self.status_left_widget = urwid.Text("")
-        self.status_right_widget = urwid.Text("", align="right")
-        self.status_widget = urwid.Columns(
-            [
-                ("weight", 1, self.status_left_widget),
-                ("pack", self.status_right_widget),
-            ]
-        )
+        self.status_widget = urwid.Text("")
         self.overlaying = False
         self.page_redraw_needed = True
         self.cursor_direction = ""
@@ -424,6 +417,9 @@ class CSVViewerApp:
             return
         if key in ("w", "W"):
             self.save_selection_dialog()
+            return
+        if key == "L":
+            self.open_file_dialog()
             return
         if key == "?":
             self.open_help_dialog()
@@ -876,6 +872,59 @@ class CSVViewerApp:
         self._refresh_rows()
 
     # ------------------------------------------------------------------
+    # Open file
+    # ------------------------------------------------------------------
+    def open_file_dialog(self) -> None:
+        from csvpeek.ui import FilenameDialog, close_overlay, show_overlay
+
+        def _on_cancel() -> None:
+            close_overlay(self)
+
+        def _on_submit(path: str) -> None:
+            if not path:
+                return
+            new_path = Path(path).expanduser()
+            old_path = self.csv_path
+            old_db = self.db
+            close_overlay(self)
+            if not new_path.exists():
+                self.notify(f"File not found: {new_path}")
+                return
+            self.csv_path = new_path
+            try:
+                self.load_csv()
+            except (SystemExit, Exception) as exc:  # noqa: BLE001
+                self.csv_path = old_path
+                self.db = old_db
+                self.notify(f"Error loading file: {exc}")
+                return
+            self.current_filters = {}
+            self.filter_patterns = {}
+            self.sorted_column = None
+            self.sorted_descending = False
+            self.filter_where = ""
+            self.filter_params = []
+            self.current_page = 0
+            self.row_offset = 0
+            self.col_offset = 0
+            self.cursor_row = 0
+            self.cursor_col = 0
+            self.selection.clear()
+            self.prev_selection.clear()
+            self.cached_rows = []
+            self.cursor_direction = ""
+            palette = self._build_palette()
+            if self.loop:
+                self.loop.screen.register_palette(palette)
+                self.loop.widget = self.build_ui()
+            self.page_redraw_needed = True
+            self._refresh_rows()
+            self.notify(f"Opened {new_path.name}")
+
+        dialog = FilenameDialog("Open", _on_submit, _on_cancel, title="Open File")
+        show_overlay(self, dialog)
+
+    # ------------------------------------------------------------------
     # Status helper
     # ------------------------------------------------------------------
     def update_status(self, *_args) -> None:  # noqa: ANN002
@@ -900,8 +949,7 @@ class CSVViewerApp:
             status = f"{status} | {selection_info.rstrip(' |')}"
         status = f"{status} | Press ? for help"
 
-        self.status_left_widget.set_text(status)
-        self.status_right_widget.set_text(self.csv_path.name)
+        self.status_widget.set_text(status)
 
     # ------------------------------------------------------------------
     # Main entry
