@@ -96,7 +96,14 @@ class CSVViewerApp:
         self.table_walker = urwid.SimpleFocusListWalker([])
         self.table_header = urwid.Columns([])
         self.listbox = PagingListBox(self, self.table_walker)
-        self.status_widget = urwid.Text("")
+        self.status_left_widget = urwid.Text("")
+        self.status_right_widget = urwid.Text("", align="right")
+        self.status_widget = urwid.Columns(
+            [
+                ("weight", 1, self.status_left_widget),
+                ("pack", self.status_right_widget),
+            ]
+        )
         self.overlaying = False
         self.page_redraw_needed = True
         self.cursor_direction = ""
@@ -888,8 +895,13 @@ class CSVViewerApp:
         row_info = f"Row: {row_number + 1}/{self.total_filtered_rows}"
         col_info = f"Col: {self.cursor_col + 1}/{self.total_columns}"
 
-        status = f"{page_info} | {row_info}, {col_info} | {selection_info} | Press ? for help"
-        self.status_widget.set_text(status)
+        status = f"{page_info} | {row_info}, {col_info}"
+        if selection_info:
+            status = f"{status} | {selection_info.rstrip(' |')}"
+        status = f"{status} | Press ? for help"
+
+        self.status_left_widget.set_text(status)
+        self.status_right_widget.set_text(self.csv_path.name)
 
     # ------------------------------------------------------------------
     # Main entry
