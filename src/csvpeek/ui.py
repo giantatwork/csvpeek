@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import glob
-import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 import urwid
@@ -206,7 +206,7 @@ class FilenameDialog(urwid.WidgetWrap):
         if key == "tab":
             partial = self.edit.edit_text
             matches = sorted(glob.glob(glob.escape(partial) + "*"))
-            matches = [m + "/" if os.path.isdir(m) else m for m in matches]
+            matches = [m + "/" if Path(m).is_dir() else m for m in matches]
             if len(matches) == 1:
                 self.edit.set_edit_text(matches[0])
                 self.edit.set_edit_pos(len(matches[0]))
