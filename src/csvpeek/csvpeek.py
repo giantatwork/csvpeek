@@ -897,6 +897,12 @@ class CSVViewerApp:
     # Main entry
     # ------------------------------------------------------------------
     def run(self) -> None:
+        # Force UTF-8 output so box-drawing characters (dividers, LineBox
+        # borders) render as real Unicode instead of the terminal's
+        # alternate charset. Without this, a non-UTF-8 locale makes urwid
+        # fall back to shift-out/shift-in escapes, which can leave the
+        # terminal stuck in line-drawing mode and garble all text.
+        urwid.set_encoding("utf-8")
         self.load_csv()
         root = self.build_ui()
         screen = urwid.raw_display.Screen()
