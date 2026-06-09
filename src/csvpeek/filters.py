@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
-import re
+from functools import lru_cache
 from typing import Iterable
+
+import duckdb
 
 
 def _quote_ident(name: str) -> str:
     repl = name.replace('"', '""')
     return f'"{repl}"'
+
+
+@lru_cache(maxsize=256)
+def _is_valid_duckdb_regex(pattern: str) -> bool:
+    """Validate a pattern against DuckDB's regex engine (RE2).
+
+    Filters run via ``regexp_matches`` in DuckDB, so patterns must be validated
+    against that engine rather than Python's ``re`` to avoid query-time errors
+    on syntax DuckDB accepts/rejects differently.
+    """
+    try:
+        duckdb.execute("SELECT regexp_matches('', ?, 'i')", [pattern])
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def build_where_clause(
@@ -37,9 +54,7 @@ def build_where_clause(
             pattern = val[1:]
             if not pattern:
                 continue
-            try:
-                re.compile(pattern)
-            except re.error:
+            if not _is_valid_duckdb_regex(pattern):
                 continue
             clauses.append(f"regexp_matches({ident}, ?, 'i')")
             params.append(pattern)

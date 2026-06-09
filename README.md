@@ -5,12 +5,12 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 
-**Csvpeek** is a snappy, memory-efficient CSV viewer built for speed. Powered by [DuckDB](https://duckdb.org/) for fast SQL-backed querying and [Urwid](https://urwid.org/) for a lean terminal UI.
+**Csvpeek** is a snappy CSV viewer built for speed. Powered by [DuckDB](https://duckdb.org/) for fast SQL-backed querying and [Urwid](https://urwid.org/) for a lean terminal UI.
 
 ## Features
 
-- **Fast** - DuckDB streaming with LIMIT/OFFSET keeps startup instant, even with huge files
-- **Large File Support** - Pagination handles millions of rows without breaking a sweat
+- **Fast** - The CSV is loaded into a DuckDB table once, then paging, sorting, and filtering run as instant SQL queries
+- **Large File Support** - The table is materialized into a temporary on-disk database, so DuckDB's buffer pool keeps memory bounded and files larger than RAM open without exhausting memory
 - **Cell Selection** - Select and copy ranges with keyboard shortcuts
 - **Column Sorting** - Sort by any column instantly
 - **Keyboard-First** - Every action is a keystroke away

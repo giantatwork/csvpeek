@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -8,16 +10,30 @@ import duckdb
 class DuckBackend:
     """DuckDB-backed data source for csvpeek."""
 
+    # Rows sampled when estimating display column widths. Widths are cosmetic
+    # and clamped to <=40 chars, so scanning the whole table is wasteful; the
+    # first N rows give a good-enough estimate and bound startup cost.
+    WIDTH_SAMPLE_ROWS = 5000
+
     def __init__(self, csv_path: Path, table_name: str = "data") -> None:
         self.csv_path = Path(csv_path)
         self.table_name = table_name
         self.con: duckdb.DuckDBPyConnection | None = None
         self.column_names: list[str] = []
         self.total_rows: int = 0
+        self._tmp_dir: str | None = None
 
     def load(self) -> None:
-        """Load the CSV into an in-memory DuckDB table and read schema/row count."""
-        self.con = duckdb.connect(database=":memory:")
+        """Load the CSV into an on-disk DuckDB table and read schema/row count.
+
+        The table is materialized into a temporary on-disk database rather than
+        an in-memory one. DuckDB's buffer pool keeps resident memory bounded by
+        spilling to disk, so files larger than available RAM load without
+        OOM-killing the process, while paging/sorting/filtering stay fast.
+        """
+        self._tmp_dir = tempfile.mkdtemp(prefix="csvpeek-")
+        db_path = Path(self._tmp_dir) / "data.duckdb"
+        self.con = duckdb.connect(database=str(db_path))
         self.con.execute(
             f"""
             CREATE TABLE {self.table_name} AS
@@ -42,7 +58,10 @@ class DuckBackend:
             f"max(length({self.quote_ident(col)})) AS len_{idx}"
             for idx, col in enumerate(self.column_names)
         ]
-        query = f"SELECT {', '.join(selects)} FROM {self.table_name}"
+        query = (
+            f"SELECT {', '.join(selects)} "
+            f"FROM (SELECT * FROM {self.table_name} LIMIT {self.WIDTH_SAMPLE_ROWS})"
+        )
         lengths = self.con.execute(query).fetchone()
         if lengths is None:
             lengths = [0] * len(self.column_names)
@@ -86,10 +105,27 @@ class DuckBackend:
         sorted_descending: bool,
         limit: int,
         offset: int,
+        strip_control_chars: bool = True,
     ) -> list[tuple]:
         if not self.con:
             return []
         order_clause = self._order_clause(sorted_column, sorted_descending)
-        select_clause = self._select_clause_with_stripped_newlines()
+        select_clause = (
+            self._select_clause_with_stripped_newlines()
+            if strip_control_chars
+            else "*"
+        )
         query = f"SELECT {select_clause} FROM {self.table_name}{where}{order_clause} LIMIT ? OFFSET ?"
         return self.con.execute(query, params + [limit, offset]).fetchall()
+
+    def close(self) -> None:
+        """Close the connection and remove the temporary on-disk database."""
+        if self.con is not None:
+            try:
+                self.con.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.con = None
+        if self._tmp_dir is not None:
+            shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            self._tmp_dir = None

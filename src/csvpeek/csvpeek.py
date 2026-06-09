@@ -357,7 +357,7 @@ class CSVViewerApp:
                 if pos == -1:
                     break
                 matches.append((pos, pos + len(lower_filter)))
-                start = pos + 1
+                start = pos + len(lower_filter)
 
         if not matches:
             # Use a space for empty cells when selected so the background color shows
@@ -610,6 +610,7 @@ class CSVViewerApp:
             self.sorted_descending,
             fetch_count,
             row_start,
+            strip_control_chars=False,
         )
 
         return [row[col_start : col_end + 1] for row in rows]
@@ -738,6 +739,7 @@ class CSVViewerApp:
                 self.sorted_descending,
                 self.total_filtered_rows,
                 0,
+                strip_control_chars=False,
             )
             try:
                 with target.open("w", newline="", encoding="utf-8") as f:
@@ -919,6 +921,9 @@ class CSVViewerApp:
                 self.loop.screen.reset_default_terminal_colors()
             except Exception:
                 pass
+            # Remove the temporary on-disk database
+            if self.db is not None:
+                self.db.close()
 
 
 def main() -> None:
